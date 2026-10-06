@@ -206,3 +206,34 @@ pub enum GraphError {
     #[error("invalid timeout on {node}")]
     InvalidTimeout { node: NodeId },
 }
+
+impl RetryPolicy {
+    /// Delay after the given failing attempt (one-based), capped by the policy.
+    #[must_use]
+    pub fn backoff(&self, attempt: u32) -> i64 {
+        let mut backoff = self.initial_backoff_micros;
+        for _ in 1..attempt.min(1000) {
+            if backoff >= self.max_backoff_micros {
+                break;
+            }
+            backoff = backoff.saturating_mul(i64::from(self.multiplier_permille)) / 1000;
+        }
+        backoff.min(self.max_backoff_micros)
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn default_backoff_and_cap() {
+        let retry = RetryPolicy::default();
+        assert_eq!(
+            (1..=8).map(|a| retry.backoff(a)).collect::<Vec<_>>(),
+            vec![
+                1_000_000, 2_000_000, 4_000_000, 8_000_000, 16_000_000, 32_000_000, 60_000_000,
+                60_000_000
+            ]
+        );
+        assert_eq!(retry.backoff(1000), 60_000_000);
+    }
+}
