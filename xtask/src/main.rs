@@ -35,16 +35,18 @@ fn check(offline: bool) {
     clippy.extend(["--", "-D", "warnings"]);
     run(workspace, &clippy);
     run(workspace, &test);
-    // test-faults gates public items; the facade must build this crate feature-off.
-    let mut sqlite_clippy = vec!["clippy", "--package", "dmt-store-sqlite", "--all-targets"];
-    let mut sqlite_test = vec!["test", "--package", "dmt-store-sqlite"];
-    if offline {
-        sqlite_clippy.push("--offline");
-        sqlite_test.push("--offline");
+    // test-faults gates public items; the facade must build these crates feature-off.
+    for package in ["dmt-store-sqlite", "dmt-runtime"] {
+        let mut clippy = vec!["clippy", "--package", package, "--all-targets"];
+        let mut test = vec!["test", "--package", package];
+        if offline {
+            clippy.push("--offline");
+            test.push("--offline");
+        }
+        clippy.extend(["--", "-D", "warnings"]);
+        run(workspace, &clippy);
+        run(workspace, &test);
     }
-    sqlite_clippy.extend(["--", "-D", "warnings"]);
-    run(workspace, &sqlite_clippy);
-    run(workspace, &sqlite_test);
 }
 
 fn run(workspace: &Path, args: &[&str]) {

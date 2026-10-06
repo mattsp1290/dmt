@@ -37,3 +37,9 @@ pub use handle::{EngineHandle, Quiescent};
 pub(crate) type NodeOutcomeResult = Result<dmt_core::NodeOutcome, HandlerError>;
 
 mod sweeps;
+
+#[cfg(feature = "test-faults")]
+mod faults;
+#[cfg(feature = "test-faults")]
+#[doc(hidden)]
+pub use faults::FaultPoint;

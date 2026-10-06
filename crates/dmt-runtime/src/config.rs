@@ -27,6 +27,10 @@ pub struct EngineConfig {
     pub cancel_grace: Duration,
     /// Identity shared by every worker of this engine.
     pub worker_id: WorkerId,
+    /// Test-only crash injection; never enable in production.
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fault: Option<crate::FaultPoint>,
 }
 impl Default for EngineConfig {
     fn default() -> Self {
@@ -42,6 +46,8 @@ impl Default for EngineConfig {
             sweep_interval: Duration::from_secs(1),
             cancel_grace: Duration::from_secs(5),
             worker_id: WorkerId::new(),
+            #[cfg(feature = "test-faults")]
+            fault: None,
         }
     }
 }

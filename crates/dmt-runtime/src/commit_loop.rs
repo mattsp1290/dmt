@@ -80,6 +80,12 @@ pub(crate) async fn outcome(
                 return;
             }
         };
+        #[cfg(feature = "test-faults")]
+        crate::faults::before_apply(
+            shared.config.fault.as_ref(),
+            &claimed.task.node_id,
+            claimed.proof.attempt,
+        );
         match shared
             .store
             .apply(commit, Some(claimed.proof.clone()))
