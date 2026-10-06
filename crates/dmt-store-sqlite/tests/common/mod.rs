@@ -53,4 +53,8 @@ impl StoreFactory for SqliteFactory {
     }
 }
 
+#[cfg(feature = "test-faults")]
+pub mod dump;
+#[cfg(feature = "test-faults")]
+pub mod scenarios;
 pub mod state;

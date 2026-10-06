@@ -3,6 +3,11 @@ mod apply;
 mod checks;
 mod claim;
 mod codec;
+#[cfg(feature = "test-faults")]
+mod faults;
+#[cfg(feature = "test-faults")]
+#[doc(hidden)]
+pub use faults::FaultPoint;
 mod error;
 mod options;
 mod read;
@@ -29,6 +34,8 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 pub struct SqliteStore {
     writer: SqlitePool,
     reader: SqlitePool,
+    #[cfg(feature = "test-faults")]
+    faults: std::sync::Arc<faults::FaultState>,
 }
 
 impl SqliteStore {
@@ -121,7 +128,12 @@ impl SqliteStore {
                 return Err(map_sqlx(error));
             }
         };
-        Ok(Self { writer, reader })
+        Ok(Self {
+            writer,
+            reader,
+            #[cfg(feature = "test-faults")]
+            faults: std::sync::Arc::new(faults::FaultState::new(options.fault)),
+        })
     }
 
     /// Close both pools, waiting for outstanding connections.
@@ -185,3 +197,13 @@ fn not_migrated() -> StoreError {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "test-faults")]
+impl SqliteStore {
+    /// Whether the configured one-shot fault has fired.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn fault_fired(&self) -> bool {
+        self.faults.fired()
+    }
+}

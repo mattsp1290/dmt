@@ -23,3 +23,8 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "atomicity"
+path = "tests/atomicity.rs"
+required-features = ["test-faults"]
