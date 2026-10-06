@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "project": {
+    "id": "dmt",
+    "name": "dmt",
+    "vision": "Give Rust applications an embeddable, SQL-persisted engine that runs long-lived, human-in-the-loop agent workflows as a graph with explicit state-machine transitions and resumes them after restarts.",
+    "repository_identity": {
+      "kind": "remote-url",
+      "value": "https://github.com/mattsp1290/dmt"
+    }
+  },
+  "comparators": [
+    {
+      "name": "Watermill",
+      "official_sources": [
+        "https://watermill.io",
+        "https://watermill.io/docs/messages-router/"
+      ],
+      "relevance": "Go router, handler, middleware, and SQL pub/sub model for coordinated message-driven execution."
+    },
+    {
+      "name": "Stately XState",
+      "official_sources": [
+        "https://stately.ai/docs",
+        "https://stately.ai/docs/xstate"
+      ],
+      "relevance": "Statecharts with hierarchical states, guards, actors, and persisted snapshots that resume."
+    },
+    {
+      "name": "Restate",
+      "official_sources": [
+        "https://restate.dev",
+        "https://docs.restate.dev"
+      ],
+      "relevance": "Durable execution with workflows, virtual objects, awakeables, and journaled side effects."
+    },
+    {
+      "name": "Temporal",
+      "official_sources": [
+        "https://temporal.io",
+        "https://docs.temporal.io"
+      ],
+      "relevance": "Workflow-as-code with activities, signals, timers, and long human-in-the-loop waits."
+    }
+  ],
+  "evaluation_lenses": [
+    {
+      "name": "Resume after restart",
+      "question": "Can a run that was killed mid-node or mid-wait complete after the process restarts with every side effect observed exactly once?"
+    },
+    {
+      "name": "Human-in-the-loop waits",
+      "question": "Can a run park on an external decision for days at no runtime cost and continue when the host resolves it?"
+    },
+    {
+      "name": "Fan-out and join",
+      "question": "Can one node spawn parallel branches and a join node run exactly once after a configurable completion policy?"
+    },
+    {
+      "name": "Embeddability",
+      "question": "Can a Rust host add dmt with one store and one registry call, with SQLite for local use and PostgreSQL for shared use, without a separate server?"
+    },
+    {
+      "name": "Observability",
+      "question": "Can an operator or agent list runs, inspect the event history of one run, and see why it is parked or failed?"
+    }
+  ],
+  "acceptance_journey": "A host app starts a run of the plan, sign-off, implement, review fan-out, fix, open-PR graph against SQLite; the process is killed during the review fan-out and again while waiting for sign-off; after restart the run completes and the host observes every node side effect exactly once.",
+  "non_goals": [
+    "Running or embedding a Restate server in the first milestone.",
+    "Distributed or multi-region execution beyond one PostgreSQL database shared by workers.",
+    "Instruction-level durability inside a node handler; node side effects are idempotent by step key instead.",
+    "A web admin UI."
+  ],
+  "ecosystem": {
+    "related_repositories": [
+      {
+        "id": "agentcraft",
+        "path_hint": "${HOME}/git/agentcraft",
+        "role": "Prospective consumer: agentic plan, review, and PR workflows after its Rust migration."
+      },
+      {
+        "id": "crabber",
+        "path_hint": "${HOME}/git/crabber",
+        "role": "Convention reference for workspace layout and xtask gates; embeddable agent runtime that would execute LLM work inside dmt nodes."
+      }
+    ]
+  }
+}
