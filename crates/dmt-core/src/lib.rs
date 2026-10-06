@@ -20,3 +20,14 @@ pub mod task_status;
 pub use event::ExhaustReason;
 pub use outcome::{BranchResult, JoinInput, NodeOutcome, Outcome, SignalPayload};
 pub use task_status::{InvalidTaskTransition, TaskEvent, TaskStatus, TransitionOwner};
+pub mod commit;
+pub mod planner;
+pub mod snapshot;
+pub use commit::{
+    Commit, CommitInvariant, JoinContribution, NewRun, NewSignal, NewTask, RunStateUpdate,
+    SignalResolution, TaskUpdate,
+};
+pub use planner::{
+    PlanError, plan_cancel, plan_exhausted, plan_outcome, plan_signal, plan_start, plan_timeout,
+};
+pub use snapshot::{BranchRef, JoinRecord, RunSnapshot, SignalRecord, TaskRecord};
