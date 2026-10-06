@@ -233,3 +233,81 @@ fn retry_policy_bounds() {
         );
     }
 }
+#[test]
+fn malformed_identifier_preserves_independent_diagnostics() {
+    let mut value = raw();
+    value["nodes"]["bad/name"] = value["nodes"]["a"].clone();
+    let duplicate = value["edges"][0].clone();
+    value["edges"].as_array_mut().unwrap().push(duplicate);
+    let found = errors(&value);
+    assert!(
+        found
+            .iter()
+            .any(|e| matches!(e, GraphError::InvalidIdentifier { .. }))
+    );
+    assert!(
+        found
+            .iter()
+            .any(|e| matches!(e,GraphError::MultipleDefaultGuards {node} if node.as_str()=="a"))
+    );
+    assert!(
+        !found
+            .iter()
+            .any(|e| matches!(e,GraphError::NoOutgoingEdge {node} if node.as_str()=="bad/name"))
+    );
+    assert!(
+        !found
+            .iter()
+            .any(|e| matches!(e, GraphError::Unreachable { .. }))
+    );
+}
+#[test]
+fn implicit_targets_and_start_identifiers_are_validated() {
+    let mut value =
+        serde_json::to_value(dmt_core::fixtures::fan_out(dmt_core::JoinPolicy::All)).unwrap();
+    value["nodes"]["fo"]["kind"]["branch"] = json!("bad/branch");
+    let found = errors(&value);
+    assert!(
+        found
+            .iter()
+            .any(|e| matches!(e,GraphError::InvalidIdentifier {value,..} if value=="bad/branch"))
+    );
+    assert!(
+        !found
+            .iter()
+            .any(|e| matches!(e, GraphError::FanOutTargetKind { .. }))
+    );
+    value["start"] = json!("bad/start");
+    assert!(
+        errors(&value)
+            .iter()
+            .any(|e| matches!(e,GraphError::InvalidIdentifier {value,..} if value=="bad/start"))
+    );
+}
+#[test]
+fn explicit_and_implicit_topology_supports_cycles_and_reports_multiple_owners() {
+    assert_eq!(dmt_core::fixtures::loop_via_wait().validate(), []);
+    let mut value =
+        serde_json::to_value(dmt_core::fixtures::fan_out(dmt_core::JoinPolicy::All)).unwrap();
+    value["nodes"]["fo2"] = value["nodes"]["fo"].clone();
+    value["edges"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"from":"a","to":"fo2","guard":{"Label":"again"}}));
+    let found = errors(&value);
+    assert!(
+        found
+            .iter()
+            .any(|e| matches!(e, GraphError::BranchOwnership { owners: 2, .. }))
+    );
+    assert!(
+        found
+            .iter()
+            .any(|e| matches!(e, GraphError::JoinOwnership { owners: 2, .. }))
+    );
+    assert!(
+        !found
+            .iter()
+            .any(|e| matches!(e, GraphError::Unreachable { .. }))
+    );
+}

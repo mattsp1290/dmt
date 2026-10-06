@@ -1,4 +1,4 @@
-use super::{Graph, GraphError, Guard, JoinPolicy, NodeKind};
+use super::{Edge, Graph, GraphError, Guard, JoinPolicy, NodeKind};
 use crate::NodeId;
 use std::collections::{BTreeMap, BTreeSet};
 fn valid(value: &str) -> bool {
@@ -25,10 +25,15 @@ impl Graph {
                 start: self.start.clone(),
             });
         }
+        identifier(self.start.as_str(), &mut errors);
         for (id, node) in &self.nodes {
             identifier(id.as_str(), &mut errors);
             if let NodeKind::Wait { signal, .. } = &node.kind {
                 identifier(signal, &mut errors);
+            }
+            if let NodeKind::FanOut { branch, join } = &node.kind {
+                identifier(branch.as_str(), &mut errors);
+                identifier(join.as_str(), &mut errors);
             }
             let retry = &node.retry;
             if !(1..=1000).contains(&retry.max_attempts)
@@ -71,20 +76,36 @@ impl Graph {
                 }
             }
         }
-        // Structural checks are meaningful only after the graph's identifiers and start are usable.
-        if self.nodes.is_empty()
-            || !self.nodes.contains_key(&self.start)
-            || errors
-                .iter()
-                .any(|e| matches!(e, GraphError::InvalidIdentifier { .. }))
-        {
-            return errors;
+        // Missing starts and empty graphs cannot support structural analysis.
+        if !self.nodes.is_empty() && self.nodes.contains_key(&self.start) {
+            self.validate_structure(&mut errors);
         }
-        self.validate_structure(&mut errors);
         errors
     }
+    fn usable_nodes(&self) -> impl Iterator<Item = (&NodeId, &super::NodeDef)> {
+        self.nodes.iter().filter(|(id, node)| {
+            valid(id.as_str())
+                && match &node.kind {
+                    NodeKind::Wait { signal, .. } => valid(signal),
+                    NodeKind::FanOut { branch, join } => {
+                        valid(branch.as_str()) && valid(join.as_str())
+                    }
+                    _ => true,
+                }
+        })
+    }
+    fn usable_edges(&self) -> impl Iterator<Item = &Edge> {
+        self.edges.iter().filter(|edge| {
+            valid(edge.from.as_str())
+                && valid(edge.to.as_str())
+                && match &edge.guard {
+                    Guard::Default => true,
+                    Guard::Label(label) => valid(label),
+                }
+        })
+    }
     fn validate_structure(&self, errors: &mut Vec<GraphError>) {
-        if let Some(node) = self.node(&self.start)
+        if let Some((_, node)) = self.usable_nodes().find(|(id, _)| *id == &self.start)
             && !matches!(
                 node.kind,
                 NodeKind::Task | NodeKind::FanOut { .. } | NodeKind::Wait { .. }
@@ -95,19 +116,13 @@ impl Graph {
                 kind: node.kind.clone(),
             });
         }
-        let mut branch_owners: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
-        let mut join_owners: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+        let mut branch_owners: BTreeMap<NodeId, usize> = BTreeMap::new();
+        let mut join_owners: BTreeMap<NodeId, usize> = BTreeMap::new();
         let mut signals: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
-        for (id, node) in &self.nodes {
+        for (id, node) in self.usable_nodes() {
             if let NodeKind::FanOut { branch, join } = &node.kind {
-                branch_owners
-                    .entry(branch.clone())
-                    .or_default()
-                    .push(id.clone());
-                join_owners
-                    .entry(join.clone())
-                    .or_default()
-                    .push(id.clone());
+                *branch_owners.entry(branch.clone()).or_default() += 1;
+                *join_owners.entry(join.clone()).or_default() += 1;
                 for (field, target, matches_kind) in [
                     (
                         "branch",
@@ -142,10 +157,16 @@ impl Graph {
         }
         self.validate_edges(errors);
         self.validate_nodes(&branch_owners, &join_owners, errors);
-        self.validate_reachability(&branch_owners, errors);
+        // Reachability depends on the complete topology; malformed identifiers make it unknowable.
+        if !errors
+            .iter()
+            .any(|e| matches!(e, GraphError::InvalidIdentifier { .. }))
+        {
+            self.validate_reachability(errors);
+        }
     }
     fn validate_edges(&self, errors: &mut Vec<GraphError>) {
-        for edge in &self.edges {
+        for edge in self.usable_edges() {
             for (which, id) in [("from", &edge.from), ("to", &edge.to)] {
                 if !self.nodes.contains_key(id) {
                     errors.push(GraphError::EdgeEndpointMissing {
@@ -171,15 +192,21 @@ impl Graph {
     }
     fn validate_nodes(
         &self,
-        branch_owners: &BTreeMap<NodeId, Vec<NodeId>>,
-        join_owners: &BTreeMap<NodeId, Vec<NodeId>>,
+        branch_owners: &BTreeMap<NodeId, usize>,
+        join_owners: &BTreeMap<NodeId, usize>,
         errors: &mut Vec<GraphError>,
     ) {
-        for (id, node) in &self.nodes {
+        for (id, node) in self.usable_nodes() {
+            if self.edges_from(id).any(|edge| {
+                !valid(edge.to.as_str())
+                    || matches!(&edge.guard, Guard::Label(label) if !valid(label))
+            }) {
+                continue;
+            }
             let outgoing: Vec<_> = self.edges_from(id).collect();
             match &node.kind {
                 NodeKind::Branch => {
-                    let owners = branch_owners.get(id).map_or(0, Vec::len);
+                    let owners = branch_owners.get(id).copied().unwrap_or(0);
                     if owners != 1 {
                         errors.push(GraphError::BranchOwnership {
                             branch: id.clone(),
@@ -188,7 +215,7 @@ impl Graph {
                     }
                 }
                 NodeKind::Join { .. } => {
-                    let owners = join_owners.get(id).map_or(0, Vec::len);
+                    let owners = join_owners.get(id).copied().unwrap_or(0);
                     if owners != 1 {
                         errors.push(GraphError::JoinOwnership {
                             join: id.clone(),
@@ -241,36 +268,24 @@ impl Graph {
             }
         }
     }
-    fn validate_reachability(
-        &self,
-        branch_owners: &BTreeMap<NodeId, Vec<NodeId>>,
-        errors: &mut Vec<GraphError>,
-    ) {
-        let mut seen = BTreeSet::new();
-        let mut pending = vec![self.start.clone()];
-        while let Some(id) = pending.pop() {
-            if !seen.insert(id.clone()) {
-                continue;
+    fn validate_reachability(&self, errors: &mut Vec<GraphError>) {
+        let mut adjacency: BTreeMap<&NodeId, Vec<&NodeId>> = BTreeMap::new();
+        for edge in &self.edges {
+            adjacency.entry(&edge.from).or_default().push(&edge.to);
+        }
+        for (id, node) in &self.nodes {
+            if let NodeKind::FanOut { branch, join } = &node.kind {
+                adjacency.entry(id).or_default().push(branch);
+                adjacency.entry(branch).or_default().push(join);
             }
-            pending.extend(self.edges_from(&id).map(|e| e.to.clone()));
-            if let Some(node) = self.node(&id) {
-                match &node.kind {
-                    NodeKind::FanOut { branch, .. } => pending.push(branch.clone()),
-                    NodeKind::Branch => {
-                        if let Some(owners) = branch_owners.get(&id) {
-                            for owner in owners {
-                                if let Some(super::NodeDef {
-                                    kind: NodeKind::FanOut { join, .. },
-                                    ..
-                                }) = self.node(owner)
-                                {
-                                    pending.push(join.clone());
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+        }
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![&self.start];
+        while let Some(id) = pending.pop() {
+            if seen.insert(id)
+                && let Some(successors) = adjacency.get(id)
+            {
+                pending.extend(successors);
             }
         }
         for node in self.nodes.keys() {
