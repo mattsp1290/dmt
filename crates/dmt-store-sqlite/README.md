@@ -11,7 +11,7 @@ cargo test -p dmt-store-sqlite
 
 ## Opening a database
 
-Call `migrate(path)` before `open(path, options)`. Migration creates a missing file with mode `0600` on Unix, including private WAL and shared-memory sidecars, and is idempotent. Existing files keep their permissions. `open` never creates a file: it rejects unmigrated databases, missing or unknown schema versions, versions newer than `SCHEMA_VERSION`, and databases outside WAL mode. It does not write to a database it rejects. Empty paths, `:memory:`, `file:` URI paths, and non-UTF-8 paths are rejected; there is no in-memory mode. Concurrent migration calls are unsupported.
+Call `migrate(path)` before `open(path, options)`. Migration creates a missing file with mode `0600` on Unix, including private WAL and shared-memory sidecars, and is idempotent. Existing files keep their permissions. `open` never creates a file: it rejects unmigrated databases, missing or unknown schema versions, versions newer than `SCHEMA_VERSION`, and databases outside WAL mode. Before opening a writable connection, a temporary read-only connection checks the schema and WAL mode. Rejection preserves the main database and WAL bytes; SQLite may create or manage the disposable shared-memory index (`-shm`) while reading a WAL. The writer revalidates after connecting. Empty paths, `:memory:`, `file:` URI paths, and non-UTF-8 paths are rejected; there is no in-memory mode. Concurrent migration calls are unsupported.
 
 ```rust,ignore
 use dmt_store_sqlite::{SqliteOptions, SqliteStore};

@@ -217,3 +217,29 @@ async fn close_then_reopen() {
     fresh(&db).await.close().await;
     open(&db).await.unwrap().close().await;
 }
+
+#[tokio::test]
+async fn rejected_newer_schema_preserves_unclean_database_and_wal() {
+    let source = TempDb::new();
+    SqliteStore::migrate(source.path()).await.unwrap();
+    let mut connection = raw(&source).await;
+    sqlx::query(SET_VERSION)
+        .bind("2")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let copy = TempDb::new();
+    std::fs::copy(source.path(), copy.path()).unwrap();
+    std::fs::copy(sidecar(&source, "-wal"), sidecar(&copy, "-wal")).unwrap();
+    assert!(!sidecar(&copy, "-shm").exists());
+    let main_before = std::fs::read(copy.path()).unwrap();
+    let wal_before = std::fs::read(sidecar(&copy, "-wal")).unwrap();
+    assert_ne!(wal_before, Vec::<u8>::new());
+    assert!(backend(open(&copy).await.unwrap_err()).contains("newer"));
+    assert_eq!(std::fs::read(copy.path()).unwrap(), main_before);
+    assert_eq!(std::fs::read(sidecar(&copy, "-wal")).unwrap(), wal_before);
+    // Read-only WAL validation can create the disposable shared-memory index.
+    if sidecar(&copy, "-shm").exists() {
+        assert!(std::fs::metadata(sidecar(&copy, "-shm")).unwrap().len() > 0);
+    }
+}

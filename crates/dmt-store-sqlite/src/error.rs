@@ -11,6 +11,9 @@ pub(crate) fn map_sqlx(error: sqlx::Error) -> StoreError {
     ) {
         return crate::codec::corrupt(error);
     }
+    if matches!(error, sqlx::Error::Encode(_)) {
+        return StoreError::Backend(format!("encode: {error}"));
+    }
     let busy = match &error {
         sqlx::Error::PoolTimedOut => true,
         sqlx::Error::Database(db) => db
@@ -42,5 +45,17 @@ mod tests {
             map_sqlx(sqlx::Error::RowNotFound),
             StoreError::Backend(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+    #[test]
+    fn encoding_error_keeps_prefix() {
+        let error = sqlx::Error::Encode(std::io::Error::other("synthetic encoding failure").into());
+        assert!(
+            matches!(map_sqlx(error), StoreError::Backend(message) if message.starts_with("encode:"))
+        );
     }
 }

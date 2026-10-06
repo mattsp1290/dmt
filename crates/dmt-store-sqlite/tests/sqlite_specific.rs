@@ -190,3 +190,46 @@ async fn optional_json_distinguishes_null() {
         Some(serde_json::Value::Null)
     );
 }
+
+#[tokio::test]
+async fn persisted_run_version_boundary_is_atomic() {
+    use sqlx::{Connection, sqlite::SqliteConnectOptions};
+    const SET_VERSION: &str = "UPDATE dmt_runs SET version=?1 WHERE id=?2";
+    let db = TempDb::new();
+    let store = fresh(&db).await;
+    let graph = fixtures::linear();
+    let run = h::start_run("version boundary", &store, &graph, "run-1", T0).await;
+    let id = h::task_id(&run, "a", 0);
+    h::claim_one("version boundary", &store, "w1", T0, &graph, &id).await;
+    let mut commit = h::plan_done("version boundary", &store, &graph, &id, "ok", T0).await;
+    let mut connection =
+        sqlx::SqliteConnection::connect_with(&SqliteConnectOptions::new().filename(db.path()))
+            .await
+            .unwrap();
+    sqlx::query(SET_VERSION)
+        .bind(i64::MAX - 1)
+        .bind(run.as_str())
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    commit.expected_run_version = u64::try_from(i64::MAX - 1).unwrap();
+    assert_eq!(
+        store.apply(commit, None).await.unwrap().run_version,
+        u64::try_from(i64::MAX).unwrap()
+    );
+    let next = h::task_id(&run, "b", 0);
+    h::claim_one("version boundary", &store, "w1", T0, &graph, &next).await;
+    let commit = h::plan_done("version boundary", &store, &graph, &next, "ok", T0).await;
+    let before = store.load_run(&run).await.unwrap();
+    let before_task = store.load_task(&next).await.unwrap();
+    let before_events = store.events(&run, 0, usize::MAX).await.unwrap();
+    assert!(
+        matches!(store.apply(commit, None).await, Err(dmt_store::StoreError::InvalidCommit(message)) if message == "run version overflow")
+    );
+    assert_eq!(store.load_run(&run).await.unwrap(), before);
+    assert_eq!(store.load_task(&next).await.unwrap(), before_task);
+    assert_eq!(
+        store.events(&run, 0, usize::MAX).await.unwrap(),
+        before_events
+    );
+}

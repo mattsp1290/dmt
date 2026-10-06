@@ -89,6 +89,22 @@ impl SqliteStore {
                 path.display()
             )));
         }
+        // Reject unsupported schemas before any writable connection can checkpoint a WAL.
+        let validation = SqlitePoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(options.busy_timeout.max(Duration::from_secs(1)))
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(path)
+                    .create_if_missing(false)
+                    .read_only(true)
+                    .busy_timeout(options.busy_timeout),
+            )
+            .await
+            .map_err(map_sqlx)?;
+        let result = check_schema(&validation).await;
+        validation.close().await;
+        result?;
         let timeout = options.busy_timeout.max(Duration::from_secs(1));
         let connect = SqliteConnectOptions::new()
             .filename(path)
