@@ -40,7 +40,12 @@ pub enum NodeInput {
     /// Task or fan-out payload.
     Task(Value),
     /// One fan-out branch and its index.
-    Branch { index: u32, value: Value },
+    Branch {
+        /// Zero-based fan-out index.
+        index: u32,
+        /// Payload for this branch.
+        value: Value,
+    },
     /// Branch results sorted by index by the planner.
     Join(JoinInput),
 }
