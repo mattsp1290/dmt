@@ -52,3 +52,5 @@ impl StoreFactory for SqliteFactory {
             .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
     }
 }
+
+pub mod state;
