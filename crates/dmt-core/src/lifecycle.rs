@@ -1,3 +1,4 @@
+use crate::GraphId;
 use crate::RunEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -37,7 +38,7 @@ impl std::fmt::Display for RunStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LifecycleEvent {
     Start {
-        graph_id: String,
+        graph_id: GraphId,
         graph_version: u32,
         definition_hash: String,
         input: Value,
