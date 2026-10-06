@@ -1,6 +1,4 @@
 //! Backend-neutral asynchronous execution of dmt graphs.
-// Scaffold helpers are consumed by the worker implementation in the next commit.
-#![allow(dead_code)]
 
 mod backoff;
 mod catalog;
@@ -27,3 +25,13 @@ mod tests {
         assert_send_sync::<Engine>();
     }
 }
+
+mod commit_loop;
+mod dispatch;
+mod handle;
+mod shared;
+mod shutdown;
+mod worker;
+pub use handle::{EngineHandle, Quiescent};
+
+pub(crate) type NodeOutcomeResult = Result<dmt_core::NodeOutcome, HandlerError>;

@@ -17,6 +17,62 @@ impl Engine {
     pub fn builder() -> EngineBuilder {
         EngineBuilder::default()
     }
+    /// Register graphs and start workers inside a Tokio runtime.
+    /// # Errors
+    /// Returns registration errors or exhausted transient retries.
+    pub async fn start(self) -> Result<crate::EngineHandle, crate::EngineError> {
+        use crate::{CancellationToken, commit_loop, handle::HandleInner, shared::Shared};
+        use dmt_store::StoreError;
+        for graph in self.catalog.graphs() {
+            let mut last = StoreError::Busy;
+            let mut registered = false;
+            for retry in 0..=self.config.max_replan_attempts {
+                if retry > 0 {
+                    tokio::time::sleep(crate::backoff::replan_delay(
+                        self.config.replan_backoff,
+                        retry - 1,
+                    ))
+                    .await;
+                }
+                match self.store.register_graph(graph).await {
+                    Ok(()) => {
+                        registered = true;
+                        break;
+                    }
+                    Err(e) if commit_loop::transient(&e) => last = e,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            if !registered {
+                return Err(crate::EngineError::Contention {
+                    attempts: self.config.max_replan_attempts.saturating_add(1),
+                    last,
+                });
+            }
+        }
+        if self.config.heartbeat_every.saturating_mul(2) > self.config.lease {
+            tracing::warn!("heartbeat cadence exceeds half the lease");
+        }
+        let shared = Arc::new(Shared {
+            store: self.store,
+            clock: self.clock,
+            config: self.config,
+            catalog: self.catalog,
+            handlers: self.handlers,
+            wake: tokio::sync::Notify::new(),
+            stop: CancellationToken::new(),
+            handler_cancel: CancellationToken::new(),
+            kill: CancellationToken::new(),
+            tracker: tokio_util::task::TaskTracker::new(),
+            in_flight: std::sync::Mutex::default(),
+        });
+        for _ in 0..shared.config.workers {
+            shared.spawn(crate::worker::run(shared.clone()));
+        }
+        Ok(crate::EngineHandle {
+            inner: Arc::new(HandleInner { shared }),
+        })
+    }
 }
 /// Collects graphs, handlers, persistence, and configuration without doing I/O.
 #[derive(Default)]
