@@ -31,3 +31,5 @@ pub use planner::{
     PlanError, plan_cancel, plan_exhausted, plan_outcome, plan_signal, plan_start, plan_timeout,
 };
 pub use snapshot::{BranchRef, JoinRecord, RunSnapshot, SignalRecord, TaskRecord};
+#[cfg(feature = "fixtures")]
+pub mod fixtures;

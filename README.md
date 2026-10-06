@@ -4,13 +4,13 @@ dmt is an embeddable Rust library for long-lived, human-in-the-loop agent workfl
 
 ## Status
 
-Milestone 1 is in progress. This repository currently contains the workspace scaffold and quality gate only. The crate map and quick start describe the milestone-1 target and identify the Beans tasks that deliver each part.
+Milestone 1 is in progress. This repository currently contains the workspace scaffold, the quality gate, and the `dmt-core` library. The crate map and quick start describe the milestone-1 target and identify the Beans tasks that deliver each part.
 
 ## Crate map
 
 | Package | Purpose | Status / task |
 | --- | --- | --- |
-| `dmt-core` | Graph, lifecycle, planner | Planned: `dmt-lr2v` |
+| `dmt-core` | Graph, lifecycle, planner | Available: `dmt-lr2v` |
 | `dmt-store` | Storage interface | Planned: `dmt-gzao` |
 | `dmt-store-conformance` | Shared store conformance checks | Planned: `dmt-gzao` |
 | `dmt-store-sqlite` | SQLite storage | Planned: `dmt-0hq5` |

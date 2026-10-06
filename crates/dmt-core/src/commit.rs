@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One atomic store update. On success the store sets version to
+/// `expected_run_version + 1`; a newly created run therefore has version 1.
 pub struct Commit {
     pub run_id: RunId,
     pub expected_run_version: u64,
@@ -36,6 +38,8 @@ pub struct RunStateUpdate {
     pub output: Option<Value>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Clear lease owner and deadline on any update to a non-Running status.
+/// Apply Cancelled only to rows still Ready or Awaiting, since claiming does not bump run version.
 pub struct TaskUpdate {
     pub task_id: TaskId,
     pub status: TaskStatus,

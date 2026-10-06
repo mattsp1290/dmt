@@ -1,4 +1,4 @@
-use dmt_core::{EndStatus, Graph, GraphBuilder, GraphError, JoinPolicy, RetryPolicy};
+use dmt_core::{EndStatus, Graph, GraphBuilder, GraphError, RetryPolicy};
 use serde_json::{Value, json};
 fn linear() -> Graph {
     GraphBuilder::new("test", 1)
@@ -199,21 +199,7 @@ fn deserialize_rejects_invalid_graph() {
 }
 #[test]
 fn pipeline_shape_is_valid() {
-    let graph = GraphBuilder::new("pipeline", 1)
-        .start("plan")
-        .task("plan")
-        .fan_out("map", "worker", "reduce")
-        .branch("worker")
-        .join("reduce", JoinPolicy::All)
-        .wait("approve", "approval", Some(60_000_000))
-        .end("done", EndStatus::Completed)
-        .end("failed", EndStatus::Failed)
-        .edge("plan", "map")
-        .edge("reduce", "approve")
-        .edge("approve", "done")
-        .edge_on("approve", "failed", "timeout")
-        .build()
-        .unwrap();
+    let graph = dmt_core::fixtures::pipeline();
     assert_eq!(graph.validate(), [] as [GraphError; 0]);
 }
 #[test]

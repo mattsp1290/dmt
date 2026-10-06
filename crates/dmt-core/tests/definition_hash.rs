@@ -50,3 +50,12 @@ fn definition_fields_change_hash() {
         );
     }
 }
+#[test]
+fn pipeline_hash_is_pinned() {
+    // Changing the derive shape of Graph, NodeKind, Edge, Guard, JoinPolicy,
+    // RetryPolicy, or EndStatus requires updating this literal in the same commit.
+    assert_eq!(
+        dmt_core::fixtures::pipeline().definition_hash(),
+        "532315045ec69a49a08fefd3682d3e18e405d9316b94eb4e979271527054763e"
+    );
+}

@@ -1,7 +1,6 @@
 mod common;
-#[path = "common/graphs.rs"]
-mod graphs;
 use common::Sim;
+use dmt_core::fixtures as graphs;
 use dmt_core::{
     BranchResult, EndStatus, Graph, GraphBuilder, JoinInput, JoinPolicy, Micros, NodeOutcome,
     Outcome, PlanError, RetryPolicy, RunEvent, RunStatus, SignalPayload, TaskId, TaskStatus,
