@@ -134,6 +134,7 @@ struct Driver {
     reclaims: u32,
     cancel_at: Option<u32>,
     cancelled: bool,
+    running_at_resolution: Vec<usize>,
 }
 impl Driver {
     fn new(
@@ -153,6 +154,7 @@ impl Driver {
             reclaims: 0,
             cancel_at,
             cancelled: false,
+            running_at_resolution: Vec::new(),
         }
     }
     fn drive(&mut self) {
@@ -241,6 +243,25 @@ impl Driver {
         self.cancelled = true;
     }
     fn resolve(&mut self) {
+        let running = self
+            .sim
+            .snapshot
+            .tasks
+            .iter()
+            .filter(|t| t.branch.is_some() && t.status == TaskStatus::Running)
+            .count();
+        let ready = self
+            .sim
+            .snapshot
+            .tasks
+            .iter()
+            .filter(|t| t.branch.is_some() && t.status == TaskStatus::Ready)
+            .count();
+        assert_eq!(
+            ready, 0,
+            "fan-out workers must be claimed before wait resolution"
+        );
+        self.running_at_resolution.push(running);
         let id = self.sim.snapshot.signals[0].signal_id.clone();
         let (label, timeout) = match &mut self.script {
             Script::Loop { rejections } if *rejections > 0 => {
@@ -269,6 +290,15 @@ impl Driver {
         };
         let first = plan().unwrap();
         assert_eq!(first, plan().unwrap());
+        if running > 0 {
+            assert_eq!(self.sim.snapshot.status, RunStatus::Active);
+            assert!(
+                !first
+                    .events
+                    .iter()
+                    .any(|e| matches!(e, RunEvent::RunResumed))
+            );
+        }
         self.sim.apply(first).unwrap();
         oracle(&self.sim);
     }
@@ -315,6 +345,7 @@ impl Driver {
         }
     }
     fn outcome(&mut self, id: &TaskId, outcome: NodeOutcome) {
+        let fan_out = matches!(&outcome, NodeOutcome::FanOut(_));
         let task = self.sim.snapshot.task(id).unwrap();
         let previous_run_at = task.run_at;
         let attempt = task.attempt;
@@ -340,6 +371,19 @@ impl Driver {
             assert_eq!(run_at, self.now.saturating_add(expected_delay));
         }
         self.sim.apply(first).unwrap();
+        if fan_out {
+            let ids: Vec<_> = self
+                .sim
+                .snapshot
+                .tasks
+                .iter()
+                .filter(|t| t.branch.is_some() && t.status == TaskStatus::Ready)
+                .map(|t| t.task_id.clone())
+                .collect();
+            for id in ids {
+                self.sim.claim(&id);
+            }
+        }
         oracle(&self.sim);
     }
 }
@@ -435,4 +479,41 @@ fn failure_retry_reclaim_failure_advances_time() {
     );
     assert_eq!(driver.reclaims, 1);
     invariants(&driver.sim, false, RunStatus::Completed);
+}
+
+fn straggler_resolution_driver(timeout: bool) {
+    let graph = fixtures::fan_out_then_wait(JoinPolicy::Quorum(1), Some(10));
+    let script = Script::FanOut {
+        branches: 2,
+        failures: vec![false, false],
+        timeout,
+        rotation: 0,
+    };
+    let mut driver = Driver::new(graph, script, 32, Vec::new(), None);
+    driver.drive();
+    assert_eq!(driver.running_at_resolution, vec![1]);
+    let event = if timeout {
+        "SignalTimedOut"
+    } else {
+        "SignalReceived"
+    };
+    let commit = driver
+        .sim
+        .commits
+        .iter()
+        .find(|c| c.events.iter().any(|e| e.kind() == event))
+        .unwrap();
+    assert_eq!(
+        commit.events.iter().map(RunEvent::kind).collect::<Vec<_>>(),
+        vec![event, "TaskCompleted", "TaskScheduled"]
+    );
+    invariants(&driver.sim, false, RunStatus::Completed);
+}
+#[test]
+fn generated_signal_with_running_straggler() {
+    straggler_resolution_driver(false);
+}
+#[test]
+fn generated_timeout_with_running_straggler() {
+    straggler_resolution_driver(true);
 }
