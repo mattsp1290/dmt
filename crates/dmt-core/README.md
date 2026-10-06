@@ -76,7 +76,7 @@ Created rejects every event except Start. Terminal states reject every event. Th
 | Lease expires and `attempt == max_attempts` | Exhausted, `TaskExhausted { LeaseReclaimsExceeded }` | store |
 
 
-Every other pair is rejected. Running tasks stay running on planner cancellation; the store later rejects their commits or cancels them during reclamation. Attempts count total handler runs, including lease reclaims. Retry backoff uses the failing attempt number: defaults are 1 s, 2 s, 4 s, capped at 60 s. Waits are never claimed and have one attempt. Branch and Join tasks use their own node's retry policy.
+Every other pair is rejected. Running tasks stay running on planner cancellation; the store later rejects their commits or cancels them during reclamation. Attempts count total handler runs, including lease reclaims. Retry backoff scales in i128 before clamping to its i64 policy cap (correcting the plan's overflow-prone intermediate saturation). It uses the failing attempt number: defaults are 1 s, 2 s, 4 s, capped at 60 s. Waits are never claimed and have one attempt. Branch and Join tasks use their own node's retry policy.
 
 ## Keys
 

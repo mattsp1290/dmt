@@ -646,3 +646,13 @@ fn status_column_equals_machine_state() {
         }
     }
 }
+#[test]
+fn large_fan_out_keeps_event_correspondence() {
+    let sim = setup_fan(graphs::fan_out(JoinPolicy::All), 10_000);
+    let commit = sim.commits.last().unwrap();
+    assert_eq!(commit.new_tasks.len(), 10_000);
+    commit.check().unwrap();
+    let mut duplicate = commit.clone();
+    duplicate.events.push(commit.events[2].clone());
+    assert!(duplicate.check().is_err());
+}

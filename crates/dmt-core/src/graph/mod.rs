@@ -61,8 +61,9 @@ impl Graph {
     pub fn nodes(&self) -> impl Iterator<Item = (&NodeId, &NodeDef)> {
         self.nodes.iter()
     }
-    pub fn edges_from<'a>(&'a self, node: &'a NodeId) -> impl Iterator<Item = &'a Edge> {
-        self.edges.iter().filter(move |edge| &edge.from == node)
+    pub fn edges_from(&self, node: &NodeId) -> impl Iterator<Item = &Edge> {
+        let node = node.clone();
+        self.edges.iter().filter(move |edge| edge.from == node)
     }
     /// Parse a graph using the derived JSON shape.
     /// # Errors
@@ -216,7 +217,10 @@ impl RetryPolicy {
             if backoff >= self.max_backoff_micros {
                 break;
             }
-            backoff = backoff.saturating_mul(i64::from(self.multiplier_permille)) / 1000;
+            // Scale before clamping: saturating the product before division can shrink the delay.
+            let scaled = i128::from(backoff) * i128::from(self.multiplier_permille) / 1000;
+            let capped = scaled.min(i128::from(self.max_backoff_micros));
+            backoff = i64::try_from(capped).unwrap_or(i64::MIN);
         }
         backoff.min(self.max_backoff_micros)
     }
@@ -224,6 +228,30 @@ impl RetryPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn backoff_scales_before_clamping() {
+        let constant = RetryPolicy {
+            initial_backoff_micros: 10_000_000_000_000_000,
+            max_backoff_micros: 20_000_000_000_000_000,
+            multiplier_permille: 1000,
+            ..RetryPolicy::default()
+        };
+        for attempt in 1..=1000 {
+            assert_eq!(constant.backoff(attempt), constant.initial_backoff_micros);
+        }
+        let growing = RetryPolicy {
+            multiplier_permille: 4000,
+            ..constant
+        };
+        assert_eq!(growing.backoff(2), growing.max_backoff_micros);
+        let unvalidated = RetryPolicy {
+            initial_backoff_micros: i64::MIN,
+            max_backoff_micros: i64::MAX,
+            multiplier_permille: u32::MAX,
+            ..RetryPolicy::default()
+        };
+        assert_eq!(unvalidated.backoff(2), i64::MIN);
+    }
     #[test]
     fn default_backoff_and_cap() {
         let retry = RetryPolicy::default();

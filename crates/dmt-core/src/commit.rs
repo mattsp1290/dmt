@@ -100,6 +100,91 @@ impl Commit {
                 Err(CommitInvariant(message.into()))
             }
         };
+        self.check_run()?;
+        let mut tasks = BTreeMap::new();
+        for task in &self.new_tasks {
+            require(
+                tasks.insert(&task.task_id, task).is_none(),
+                "duplicate task id",
+            )?;
+        }
+        let mut scheduled = BTreeMap::new();
+        for event in &self.events {
+            match event {
+                RunEvent::TaskScheduled {
+                    task_id,
+                    node_id,
+                    step_key,
+                    attempt,
+                    run_at,
+                    max_attempts,
+                } => {
+                    require(
+                        tasks.get(task_id).is_some_and(|t| {
+                            &t.task_id == task_id
+                                && &t.node_id == node_id
+                                && &t.step_key == step_key
+                                && t.attempt == *attempt
+                                && t.run_at == *run_at
+                                && t.max_attempts == *max_attempts
+                                && t.status == TaskStatus::Ready
+                        }),
+                        "scheduled event missing matching task",
+                    )?;
+                    *scheduled.entry(task_id).or_insert(0_usize) += 1;
+                }
+                RunEvent::WaitOpened {
+                    task_id,
+                    signal_id,
+                    signal_key,
+                    deadline_at,
+                } => {
+                    require(
+                        tasks
+                            .get(task_id)
+                            .is_some_and(|t| t.status == TaskStatus::Awaiting),
+                        "wait event missing task",
+                    )?;
+                    require(
+                        self.new_signal.as_ref().is_some_and(|s| {
+                            &s.task_id == task_id
+                                && &s.signal_id == signal_id
+                                && &s.key == signal_key
+                                && s.deadline_at == *deadline_at
+                        }),
+                        "wait event missing signal",
+                    )?;
+                    *scheduled.entry(task_id).or_insert(0_usize) += 1;
+                }
+                _ => {}
+            }
+        }
+        let mut ids = BTreeSet::new();
+        let mut keys = BTreeSet::new();
+        for task in &self.new_tasks {
+            require(
+                ids.insert(&task.task_id) && keys.insert(&task.step_key),
+                "duplicate task id or step key",
+            )?;
+            require(
+                task.task_id.as_str() == task.step_key.as_str(),
+                "task id differs from step key",
+            )?;
+            require(
+                scheduled.get(&task.task_id) == Some(&1),
+                "task missing unique scheduling event",
+            )?;
+        }
+        self.check_relations()
+    }
+    fn check_run(&self) -> Result<(), CommitInvariant> {
+        let require = |condition, message: &str| {
+            if condition {
+                Ok(())
+            } else {
+                Err(CommitInvariant(message.into()))
+            }
+        };
         require(self.run_id.is_valid(), "invalid run id")?;
         require(
             self.new_run.is_some() == (self.expected_run_version == 0),
@@ -120,74 +205,7 @@ impl Commit {
             self.run_state.is_some() == lifecycle,
             "lifecycle/state mismatch",
         )?;
-        let mut scheduled = Vec::new();
-        for event in &self.events {
-            match event {
-                RunEvent::TaskScheduled {
-                    task_id,
-                    node_id,
-                    step_key,
-                    attempt,
-                    run_at,
-                    max_attempts,
-                } => {
-                    require(
-                        self.new_tasks.iter().any(|t| {
-                            &t.task_id == task_id
-                                && &t.node_id == node_id
-                                && &t.step_key == step_key
-                                && t.attempt == *attempt
-                                && t.run_at == *run_at
-                                && t.max_attempts == *max_attempts
-                                && t.status == TaskStatus::Ready
-                        }),
-                        "scheduled event missing matching task",
-                    )?;
-                    scheduled.push(task_id);
-                }
-                RunEvent::WaitOpened {
-                    task_id,
-                    signal_id,
-                    signal_key,
-                    deadline_at,
-                } => {
-                    require(
-                        self.new_tasks
-                            .iter()
-                            .any(|t| &t.task_id == task_id && t.status == TaskStatus::Awaiting),
-                        "wait event missing task",
-                    )?;
-                    require(
-                        self.new_signal.as_ref().is_some_and(|s| {
-                            &s.task_id == task_id
-                                && &s.signal_id == signal_id
-                                && &s.key == signal_key
-                                && s.deadline_at == *deadline_at
-                        }),
-                        "wait event missing signal",
-                    )?;
-                    scheduled.push(task_id);
-                }
-                _ => {}
-            }
-        }
-        let mut ids = BTreeSet::new();
-        let mut keys = BTreeSet::new();
-        for task in &self.new_tasks {
-            require(
-                ids.insert(&task.task_id) && keys.insert(&task.step_key),
-                "duplicate task id or step key",
-            )?;
-            require(
-                task.task_id.as_str() == task.step_key.as_str(),
-                "task id differs from step key",
-            )?;
-            require(
-                scheduled.iter().filter(|id| **id == &task.task_id).count() == 1,
-                "task missing unique scheduling event",
-            )?;
-        }
-        self.check_relations()
+        Ok(())
     }
     fn check_relations(&self) -> Result<(), CommitInvariant> {
         let require = |condition, message: &str| {

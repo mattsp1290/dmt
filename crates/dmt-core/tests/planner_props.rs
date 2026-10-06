@@ -9,82 +9,6 @@ use proptest::prelude::*;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 const NOW: Micros = Micros(10_000_000);
-fn outcome(sim: &mut Sim, id: &TaskId, outcome: NodeOutcome) {
-    if sim.snapshot.task(id).unwrap().status == TaskStatus::Ready {
-        sim.claim(id);
-    }
-    let first = plan_outcome(&sim.graph, &sim.snapshot, id, outcome.clone(), NOW).unwrap();
-    assert_eq!(
-        first,
-        plan_outcome(&sim.graph, &sim.snapshot, id, outcome, NOW).unwrap()
-    );
-    sim.apply(first).unwrap();
-    oracle(sim);
-}
-fn signal(sim: &mut Sim, label: &str, timeout: bool) {
-    let id = sim.snapshot.signals[0].signal_id.clone();
-    let plan = || {
-        if timeout {
-            plan_timeout(&sim.graph, &sim.snapshot, &id, NOW)
-        } else {
-            plan_signal(
-                &sim.graph,
-                &sim.snapshot,
-                &id,
-                SignalPayload {
-                    label: label.into(),
-                    payload: Value::Null,
-                },
-                NOW,
-            )
-        }
-    };
-    let first = plan().unwrap();
-    assert_eq!(first, plan().unwrap());
-    sim.apply(first).unwrap();
-    oracle(sim);
-}
-fn maybe_cancel(sim: &mut Sim, step: u32, cancel_at: Option<u32>) -> bool {
-    if Some(step) != cancel_at || sim.snapshot.status.is_terminal() {
-        return false;
-    }
-    let first = plan_cancel(&sim.graph, &sim.snapshot, "cancel".into(), NOW).unwrap();
-    assert_eq!(
-        first,
-        plan_cancel(&sim.graph, &sim.snapshot, "cancel".into(), NOW).unwrap()
-    );
-    sim.apply(first).unwrap();
-    true
-}
-fn reclaim(sim: &mut Sim, id: &TaskId, count: u32, allow_exhaust: bool) -> u32 {
-    if sim.snapshot.task(id).unwrap().status == TaskStatus::Ready {
-        sim.claim(id);
-    }
-    let mut reclaimed = 0;
-    for _ in 0..count {
-        let task = sim.snapshot.task(id).unwrap();
-        if task.status == TaskStatus::Exhausted
-            || (!allow_exhaust && task.attempt == task.max_attempts)
-        {
-            break;
-        }
-        let before = task.attempt;
-        sim.reclaim(id);
-        reclaimed += 1;
-        let after = sim.snapshot.task(id).unwrap();
-        if after.status == TaskStatus::Exhausted {
-            let first = plan_exhausted(&sim.graph, &sim.snapshot, id, NOW).unwrap();
-            assert_eq!(
-                first,
-                plan_exhausted(&sim.graph, &sim.snapshot, id, NOW).unwrap()
-            );
-            sim.apply(first).unwrap();
-            break;
-        }
-        assert_eq!(after.attempt, before + 1);
-    }
-    reclaimed
-}
 fn oracle(sim: &Sim) {
     if sim.snapshot.status.is_terminal() {
         return;
@@ -183,20 +107,241 @@ fn invariants(sim: &Sim, cancelled: bool, expected: RunStatus) {
         .is_some_and(|s| s.status == RunStatus::Parked);
     assert_eq!(parked, resumed + usize::from(cancelled_parked));
 }
-fn done_node(sim: &mut Sim, node: &str, label: &str, reclaims: u32) {
-    let id = sim
-        .snapshot
-        .tasks
-        .iter()
-        .find(|t| {
-            t.node_id.as_str() == node
-                && matches!(t.status, TaskStatus::Ready | TaskStatus::Running)
-        })
-        .unwrap()
-        .task_id
-        .clone();
-    reclaim(sim, &id, reclaims, false);
-    outcome(sim, &id, NodeOutcome::Done(Outcome::done(label)));
+
+#[derive(Clone)]
+enum Script {
+    Linear,
+    Loop {
+        rejections: u32,
+    },
+    FanOut {
+        branches: u32,
+        failures: Vec<bool>,
+        timeout: bool,
+        rotation: usize,
+    },
+    Retry {
+        failures: u32,
+    },
+}
+struct Driver {
+    sim: Sim,
+    script: Script,
+    now: Micros,
+    step: u32,
+    budget: u32,
+    reclaim_steps: BTreeSet<u32>,
+    reclaims: u32,
+    cancel_at: Option<u32>,
+    cancelled: bool,
+}
+impl Driver {
+    fn new(
+        graph: Graph,
+        script: Script,
+        budget: u32,
+        reclaim_steps: Vec<u32>,
+        cancel_at: Option<u32>,
+    ) -> Self {
+        Self {
+            sim: Sim::start(graph, Value::Null, NOW),
+            script,
+            now: NOW,
+            step: 0,
+            budget,
+            reclaim_steps: reclaim_steps.into_iter().collect(),
+            reclaims: 0,
+            cancel_at,
+            cancelled: false,
+        }
+    }
+    fn drive(&mut self) {
+        oracle(&self.sim);
+        while !self.sim.snapshot.status.is_terminal() {
+            assert!(self.step < self.budget, "shape exceeded step budget");
+            let step = self.step;
+            self.step += 1;
+            if Some(step) == self.cancel_at {
+                self.cancel();
+                break;
+            }
+            if !self.sim.snapshot.signals.is_empty() {
+                self.resolve();
+                continue;
+            }
+            let id = self.next_task();
+            self.now = self.now.max(self.sim.snapshot.task(&id).unwrap().run_at);
+            if self.sim.snapshot.task(&id).unwrap().status == TaskStatus::Ready {
+                self.sim.claim(&id);
+            }
+            let task = self.sim.snapshot.task(&id).unwrap();
+            let can_reclaim =
+                matches!(self.script, Script::Retry { .. }) || task.attempt < task.max_attempts;
+            if self.reclaim_steps.contains(&step) && can_reclaim {
+                self.reclaim(&id);
+                continue;
+            }
+            let outcome = self.scripted_outcome(&id);
+            self.outcome(&id, outcome);
+        }
+    }
+    fn next_task(&self) -> TaskId {
+        let mut tasks: Vec<_> = self
+            .sim
+            .snapshot
+            .tasks
+            .iter()
+            .filter(|t| matches!(t.status, TaskStatus::Ready | TaskStatus::Running))
+            .collect();
+        let rotation = if let Script::FanOut { rotation, .. } = self.script {
+            rotation
+        } else {
+            0
+        };
+        tasks.sort_by_key(|t| {
+            let rank = match t.node_id.as_str() {
+                "a" => 0,
+                "fo" => 1,
+                "jn" => 2,
+                "br" => 3,
+                _ => 4,
+            };
+            let index = t
+                .branch
+                .as_ref()
+                .map_or(0, |b| usize::try_from(b.index).unwrap());
+            let branch_rank = if let Script::FanOut { branches, .. } = self.script {
+                (index + rotation) % usize::try_from(branches).unwrap()
+            } else {
+                index
+            };
+            (rank, branch_rank, t.run_at, &t.step_key)
+        });
+        tasks[0].task_id.clone()
+    }
+    fn cancel(&mut self) {
+        let first = plan_cancel(
+            &self.sim.graph,
+            &self.sim.snapshot,
+            "cancel".into(),
+            self.now,
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            plan_cancel(
+                &self.sim.graph,
+                &self.sim.snapshot,
+                "cancel".into(),
+                self.now
+            )
+            .unwrap()
+        );
+        self.sim.apply(first).unwrap();
+        self.cancelled = true;
+    }
+    fn resolve(&mut self) {
+        let id = self.sim.snapshot.signals[0].signal_id.clone();
+        let (label, timeout) = match &mut self.script {
+            Script::Loop { rejections } if *rejections > 0 => {
+                *rejections -= 1;
+                ("changes_requested", false)
+            }
+            Script::Loop { .. } => ("approved", false),
+            Script::FanOut { timeout, .. } => ("ok", *timeout),
+            _ => unreachable!("this script has no waits"),
+        };
+        let plan = || {
+            if timeout {
+                plan_timeout(&self.sim.graph, &self.sim.snapshot, &id, self.now)
+            } else {
+                plan_signal(
+                    &self.sim.graph,
+                    &self.sim.snapshot,
+                    &id,
+                    SignalPayload {
+                        label: label.into(),
+                        payload: Value::Null,
+                    },
+                    self.now,
+                )
+            }
+        };
+        let first = plan().unwrap();
+        assert_eq!(first, plan().unwrap());
+        self.sim.apply(first).unwrap();
+        oracle(&self.sim);
+    }
+    fn reclaim(&mut self, id: &TaskId) {
+        let before = self.sim.snapshot.task(id).unwrap().attempt;
+        self.sim.reclaim(id);
+        self.reclaims += 1;
+        let after = self.sim.snapshot.task(id).unwrap();
+        if after.status == TaskStatus::Exhausted {
+            let first = plan_exhausted(&self.sim.graph, &self.sim.snapshot, id, self.now).unwrap();
+            assert_eq!(
+                first,
+                plan_exhausted(&self.sim.graph, &self.sim.snapshot, id, self.now).unwrap()
+            );
+            self.sim.apply(first).unwrap();
+        } else {
+            assert_eq!(after.attempt, before + 1);
+        }
+        oracle(&self.sim);
+    }
+    fn scripted_outcome(&mut self, id: &TaskId) -> NodeOutcome {
+        let task = self.sim.snapshot.task(id).unwrap();
+        match &mut self.script {
+            Script::FanOut { branches, .. } if task.node_id.as_str() == "fo" => {
+                NodeOutcome::FanOut((0..*branches).map(|n| json!(n)).collect())
+            }
+            Script::FanOut { failures, .. }
+                if task.node_id.as_str() == "br"
+                    && failures[usize::try_from(task.branch.as_ref().unwrap().index).unwrap()] =>
+            {
+                NodeOutcome::Fail {
+                    message: "branch failure".into(),
+                    retryable: false,
+                }
+            }
+            Script::Retry { failures } if *failures > 0 => {
+                *failures -= 1;
+                NodeOutcome::Fail {
+                    message: "retry".into(),
+                    retryable: true,
+                }
+            }
+            _ => NodeOutcome::Done(Outcome::done("ok")),
+        }
+    }
+    fn outcome(&mut self, id: &TaskId, outcome: NodeOutcome) {
+        let task = self.sim.snapshot.task(id).unwrap();
+        let previous_run_at = task.run_at;
+        let attempt = task.attempt;
+        let first = plan_outcome(
+            &self.sim.graph,
+            &self.sim.snapshot,
+            id,
+            outcome.clone(),
+            self.now,
+        )
+        .unwrap();
+        assert_eq!(
+            first,
+            plan_outcome(&self.sim.graph, &self.sim.snapshot, id, outcome, self.now).unwrap()
+        );
+        if matches!(self.script, Script::Retry { .. })
+            && first.task_updates[0].status == TaskStatus::Ready
+        {
+            // These generated policies use default 2x scaling, independently calculated here.
+            let expected_delay = 1_000_000_i64 * (1_i64 << (attempt - 1));
+            let run_at = first.task_updates[0].run_at;
+            assert_eq!(run_at.as_i64() - previous_run_at.as_i64(), expected_delay);
+            assert_eq!(run_at, self.now.saturating_add(expected_delay));
+        }
+        self.sim.apply(first).unwrap();
+        oracle(&self.sim);
+    }
 }
 fn linear(nodes: u32) -> Graph {
     let mut builder = GraphBuilder::new("linear-property", 1).start("n0");
@@ -216,57 +361,78 @@ fn linear(nodes: u32) -> Graph {
 proptest! {
     #![proptest_config(ProptestConfig {cases:256,..ProptestConfig::default()})]
     #[test]
-    fn linear_shapes(nodes in 1u32..=6,cancel in prop::option::of(0u32..30),reclaims in prop::collection::vec(0u32..3,6)) {
-        let mut sim=Sim::start(linear(nodes),Value::Null,NOW);oracle(&sim);let mut cancelled=false;
-        for step in 0..nodes {if maybe_cancel(&mut sim,step,cancel) {cancelled=true;break;}done_node(&mut sim,&format!("n{step}"),"ok",reclaims[usize::try_from(step).unwrap()]);}
-        invariants(&sim,cancelled,RunStatus::Completed);
+    fn linear_shapes(nodes in 1u32..=6,cancel in prop::option::of(0u32..30),reclaims in prop::collection::vec(0u32..30,0..30)) {
+        let mut driver=Driver::new(linear(nodes),Script::Linear,3*nodes+10,reclaims,cancel);
+        driver.drive();invariants(&driver.sim,driver.cancelled,RunStatus::Completed);
     }
     #[test]
-    fn loop_shapes(rejections in 0u32..=4,cancel in prop::option::of(0u32..50),reclaims in prop::collection::vec(0u32..3,6)) {
-        let mut sim=Sim::start(fixtures::loop_via_wait(),Value::Null,NOW);let mut cancelled=false;let mut step=0;
-        for i in 0..=rejections {
-            if maybe_cancel(&mut sim,step,cancel) {cancelled=true;break;}step+=1;
-            done_node(&mut sim,"plan","ok",reclaims[usize::try_from(i).unwrap()]);
-            if maybe_cancel(&mut sim,step,cancel) {cancelled=true;break;}step+=1;
-            signal(&mut sim,if i<rejections {"changes_requested"} else {"approved"},false);
-        }
-        if !cancelled {if maybe_cancel(&mut sim,step,cancel) {cancelled=true;} else {done_node(&mut sim,"implement","ok",reclaims[5]);}}
-        prop_assert!(step<=8*(rejections+1)+10);invariants(&sim,cancelled,RunStatus::Completed);
+    fn loop_shapes(rejections in 0u32..=4,cancel in prop::option::of(0u32..50),reclaims in prop::collection::vec(0u32..50,0..50)) {
+        let mut driver=Driver::new(fixtures::loop_via_wait(),Script::Loop {rejections},8*(rejections+1)+10,reclaims,cancel);
+        driver.drive();invariants(&driver.sim,driver.cancelled,RunStatus::Completed);
     }
     #[test]
-    fn fan_out_shapes(branches in 1u32..=6,quorum in 0u32..=6,failures in prop::collection::vec(any::<bool>(),6),cancel in prop::option::of(0u32..60),reclaims in prop::collection::vec(0u32..3,10),wait in prop::option::of((any::<bool>(),any::<bool>())),rotation in 0usize..6) {
+    fn fan_out_shapes(branches in 1u32..=6,quorum in 0u32..=6,failures in prop::collection::vec(any::<bool>(),6),cancel in prop::option::of(0u32..60),reclaims in prop::collection::vec(0u32..60,0..60),wait in prop::option::of((any::<bool>(),any::<bool>())),rotation in 0usize..6) {
         let policy=if quorum==0 {JoinPolicy::All} else {JoinPolicy::Quorum(quorum.min(branches))};
         let graph=if let Some((deadline,_))=wait {fixtures::fan_out_then_wait(policy,deadline.then_some(10))} else {fixtures::fan_out(policy)};
-        let mut sim=Sim::start(graph,Value::Null,NOW);let mut step=0;let mut cancelled=false;
-        let mut ids=Vec::new();let mut contributed=BTreeSet::new();
-        while !sim.snapshot.status.is_terminal() {
-            prop_assert!(step<6*branches+20);
-            if maybe_cancel(&mut sim,step,cancel) {cancelled=true;break;}step+=1;
-            if !sim.snapshot.signals.is_empty() {signal(&mut sim,"ok",wait.is_some_and(|(deadline,timeout)|deadline&&timeout));continue;}
-            if sim.snapshot.tasks.iter().any(|t|t.node_id.as_str()=="a"&&t.status==TaskStatus::Ready) {done_node(&mut sim,"a","ok",reclaims[0]);continue;}
-            if sim.snapshot.tasks.iter().any(|t|t.node_id.as_str()=="fo"&&t.status==TaskStatus::Ready) {
-                let id=sim.task_by_node("fo",0).task_id.clone();reclaim(&mut sim,&id,reclaims[1],false);outcome(&mut sim,&id,NodeOutcome::FanOut((0..branches).map(|n|json!(n)).collect()));
-                ids=sim.snapshot.tasks.iter().filter(|t|t.node_id.as_str()=="br").map(|t|t.task_id.clone()).collect();let len=ids.len();ids.rotate_left(rotation%len);for id in &ids {sim.claim(id);}continue;
-            }
-            // Prefer the join to leave running stragglers while opening and resolving a wait.
-            if sim.snapshot.tasks.iter().any(|t|t.node_id.as_str()=="jn"&&t.status==TaskStatus::Ready) {done_node(&mut sim,"jn","ok",reclaims[8]);continue;}
-            if let Some(id)=ids.iter().find(|id|!contributed.contains(*id)).cloned() {
-                let index=sim.snapshot.task(&id).unwrap().branch.as_ref().unwrap().index;contributed.insert(id.clone());reclaim(&mut sim,&id,reclaims[usize::try_from(index).unwrap()+2],false);
-                outcome(&mut sim,&id,if failures[usize::try_from(index).unwrap()] {NodeOutcome::Fail {message:"branch failure".into(),retryable:false}} else {NodeOutcome::Done(Outcome::done("ok"))});continue;
-            }
-            done_node(&mut sim,"t","ok",reclaims[9]);
-        }
-        invariants(&sim,cancelled,RunStatus::Completed);
+        let script=Script::FanOut {branches,failures,timeout:wait.is_some_and(|(d,t)|d&&t),rotation};
+        let mut driver=Driver::new(graph,script,6*branches+20,reclaims,cancel);
+        driver.drive();invariants(&driver.sim,driver.cancelled,RunStatus::Completed);
     }
     #[test]
-    fn retry_shapes(max in 1u32..=5,failures in 0u32..=5,reclaims in 0u32..=5,cancel in prop::option::of(0u32..40)) {
-        let mut sim=Sim::start(fixtures::retry_chain(max),Value::Null,NOW);let id=sim.task_by_node("a",0).task_id.clone();let mut cancelled=false;let mut step=0;let mut reclaim_count=0;let mut failed_count=0;
-        while !sim.snapshot.status.is_terminal() {
-            prop_assert!(step<4*max+10);
-            if maybe_cancel(&mut sim,step,cancel) {cancelled=true;break;}step+=1;
-            if reclaim_count<reclaims {reclaim_count+=reclaim(&mut sim,&id,1,true);if sim.snapshot.status.is_terminal() {break;}continue;}
-            if failed_count<failures {failed_count+=1;let attempt=sim.snapshot.task(&id).unwrap().attempt;outcome(&mut sim,&id,NodeOutcome::Fail {message:"retry".into(),retryable:true});if !sim.snapshot.status.is_terminal() {prop_assert_eq!(sim.snapshot.task(&id).unwrap().run_at,NOW.saturating_add(sim.graph.node(&"a".into()).unwrap().retry.backoff(attempt)));}} else {outcome(&mut sim,&id,NodeOutcome::Done(Outcome::done("ok")));}
-        }
-        let expected=if failures+reclaims<max {RunStatus::Completed} else {RunStatus::Failed};invariants(&sim,cancelled,expected);
+    fn retry_shapes(max in 1u32..=5,failures in 0u32..=5,reclaims in prop::collection::vec(0u32..30,0..30),cancel in prop::option::of(0u32..40)) {
+        let mut driver=Driver::new(fixtures::retry_chain(max),Script::Retry {failures},4*max+10,reclaims,cancel);
+        driver.drive();let expected=if failures+driver.reclaims<max {RunStatus::Completed} else {RunStatus::Failed};
+        invariants(&driver.sim,driver.cancelled,expected);
     }
+}
+#[test]
+fn cancel_between_reclaim_and_outcome() {
+    let mut driver = Driver::new(linear(1), Script::Linear, 13, vec![0], Some(1));
+    driver.drive();
+    let task = driver.sim.task_by_node("n0", 0);
+    assert_eq!(task.attempt, 2);
+    assert_eq!(task.status, TaskStatus::Running);
+    assert!(
+        !driver
+            .sim
+            .events
+            .iter()
+            .any(|e| matches!(e, RunEvent::TaskCompleted { .. }))
+    );
+    invariants(&driver.sim, true, RunStatus::Completed);
+}
+#[test]
+fn failure_retry_reclaim_failure_advances_time() {
+    let mut driver = Driver::new(
+        fixtures::retry_chain(5),
+        Script::Retry { failures: 2 },
+        30,
+        vec![1],
+        None,
+    );
+    driver.drive();
+    let retries: Vec<_> = driver
+        .sim
+        .events
+        .iter()
+        .filter_map(|e| {
+            if let RunEvent::TaskRetryScheduled {
+                attempt, run_at, ..
+            } = e
+            {
+                Some((*attempt, *run_at))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        retries,
+        vec![
+            (2, NOW.saturating_add(1_000_000)),
+            (4, NOW.saturating_add(5_000_000))
+        ]
+    );
+    assert_eq!(driver.reclaims, 1);
+    invariants(&driver.sim, false, RunStatus::Completed);
 }
