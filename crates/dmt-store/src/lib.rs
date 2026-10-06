@@ -1,4 +1,6 @@
 //! Backend-neutral persistence contract and host clocks for dmt.
+pub mod memory;
+pub use memory::MemoryStore;
 pub mod clock;
 pub mod error;
 pub mod store;
