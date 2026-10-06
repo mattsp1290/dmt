@@ -4,7 +4,7 @@ dmt is an embeddable Rust library for long-lived, human-in-the-loop agent workfl
 
 ## Status
 
-Milestone 1 is in progress. This repository currently contains the workspace scaffold, the quality gate, the `dmt-core` library, the `dmt-store` contract with `MemoryStore`, and the `dmt-store-conformance` suite. The crate map and quick start describe the milestone-1 target and identify the Beans tasks that deliver each part.
+Milestone 1 is in progress. This repository currently contains the workspace scaffold, the quality gate, the `dmt-core` library, the `dmt-store` contract with `MemoryStore`, the `dmt-store-conformance` suite, and the `dmt-store-sqlite` durable backend. The crate map and quick start describe the milestone-1 target and identify the Beans tasks that deliver each part.
 
 ## Crate map
 
@@ -13,7 +13,7 @@ Milestone 1 is in progress. This repository currently contains the workspace sca
 | `dmt-core` | Graph, lifecycle, planner | Available: `dmt-lr2v` |
 | `dmt-store` | Storage interface | Available: `dmt-gzao` |
 | `dmt-store-conformance` | Shared store conformance checks | Available: `dmt-gzao` |
-| `dmt-store-sqlite` | SQLite storage | Planned: `dmt-0hq5` |
+| `dmt-store-sqlite` | SQLite storage | Available: `dmt-0hq5` |
 | `dmt-runtime` | Workflow execution | Planned: `dmt-76cp` |
 | `dmt` | Public facade | Planned: `dmt-nvsm` |
 | `examples/agent-pipeline` | Runnable workflow example | Planned: `dmt-nvsm` |
