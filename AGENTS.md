@@ -2,9 +2,9 @@
 
 ## Workspace
 
-This Cargo workspace uses Rust 2024. Run `cargo xtask check` before handing off changes. It runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`.
+This Cargo workspace uses Rust 2024. Run `cargo xtask check` before handing off changes. It runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`, followed by feature-off `cargo clippy --package dmt-store-sqlite --all-targets -- -D warnings` and `cargo test --package dmt-store-sqlite`.
 
-`cargo xtask check --offline` passes `--offline` to Clippy and tests. `cargo fmt` has no such flag and never uses the network.
+`cargo xtask check --offline` passes `--offline` to all workspace and feature-off Clippy and test commands. `cargo fmt` has no such flag and never uses the network.
 
 Workspace lints forbid `unsafe_code` and warn on `clippy::all` and `clippy::pedantic`; the gate promotes warnings to errors. Do not add `#[allow]` to pass the gate without a comment explaining why.
 

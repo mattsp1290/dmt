@@ -1,0 +1,30 @@
+[package]
+name = "dmt-store-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite Store backend for dmt on sqlx"
+
+[features]
+test-faults = []
+
+[dependencies]
+dmt-core = { path = "../dmt-core" }
+dmt-store = { path = "../dmt-store" }
+sqlx.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+dmt-core = { path = "../dmt-core", features = ["fixtures"] }
+dmt-store-conformance = { path = "../dmt-store-conformance" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true
+
+[[test]]
+name = "atomicity"
+path = "tests/atomicity.rs"
+required-features = ["test-faults"]
