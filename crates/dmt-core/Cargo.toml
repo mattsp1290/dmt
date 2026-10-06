@@ -1,0 +1,21 @@
+[package]
+name = "dmt-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Graph model, run lifecycle, and planner for dmt"
+
+[features]
+fixtures = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+statig.workspace = true
+
+[dev-dependencies]
+dmt-core = { path = ".", features = ["fixtures"] }
+
+[lints]
+workspace = true
