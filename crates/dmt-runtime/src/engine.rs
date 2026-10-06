@@ -69,6 +69,9 @@ impl Engine {
         for _ in 0..shared.config.workers {
             shared.spawn(crate::worker::run(shared.clone()));
         }
+        if shared.config.workers > 0 {
+            shared.spawn(crate::sweeps::run(shared.clone()));
+        }
         Ok(crate::EngineHandle {
             inner: Arc::new(HandleInner { shared }),
         })

@@ -868,3 +868,641 @@ async fn assert_reclaimed_completion(first: &EngineHandle, run: &RunId) {
         .collect();
     assert_eq!(completions, [2]);
 }
+fn payload(label: &str) -> SignalPayload {
+    SignalPayload {
+        label: label.into(),
+        payload: Value::Null,
+    }
+}
+async fn loop_engine(
+    store: Arc<dyn Store>,
+    clock: Arc<dyn Clock>,
+    config: EngineConfig,
+) -> EngineHandle {
+    let done = handler(|_, _| async { done() });
+    start(
+        store,
+        clock,
+        fixtures::loop_via_wait(),
+        config,
+        &[("plan", done.clone()), ("implement", done)],
+    )
+    .await
+}
+async fn parked(h: &EngineHandle, run: &RunId) {
+    assert_eq!(
+        h.wait_quiescent(run, Duration::from_secs(5)).await.unwrap(),
+        Quiescent::Parked
+    );
+}
+#[tokio::test(start_paused = true)]
+async fn loop_via_signoff_uses_occurrence_keys() {
+    let r = Recorder::default();
+    let rec = r.clone();
+    let hnd = handler(move |ctx, _| {
+        rec.record(ctx);
+        async { done() }
+    });
+    let h = start(
+        Arc::new(MemoryStore::new()),
+        Arc::new(ManualClock::new(T0)),
+        fixtures::loop_via_wait(),
+        fast_config(),
+        &[("plan", hnd.clone()), ("implement", hnd)],
+    )
+    .await;
+    let run = h.start_run(&"loop".into(), Value::Null).await.unwrap();
+    for _ in 0..2 {
+        parked(&h, &run).await;
+        h.signal(&run, "signoff", payload("changes_requested"))
+            .await
+            .unwrap();
+    }
+    parked(&h, &run).await;
+    h.signal(&run, "signoff", payload("approved"))
+        .await
+        .unwrap();
+    completed(&h, &run).await;
+    assert_eq!(
+        r.entries()
+            .iter()
+            .filter(|c| c.node_id.as_str() == "plan")
+            .map(|c| c.step_key.clone())
+            .collect::<Vec<_>>(),
+        (0..3)
+            .map(|i| StepKey::task(&run, &"plan".into(), i))
+            .collect::<Vec<_>>()
+    );
+    let keys: Vec<_> = events(&h, &run)
+        .await
+        .into_iter()
+        .filter_map(|e| {
+            if let RunEvent::WaitOpened { signal_key, .. } = e {
+                Some(signal_key.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(keys, ["signoff/0", "signoff/1", "signoff/2"]);
+    assert_eq!(kind_count(&h, &run, "RunParked").await, 3);
+    assert_eq!(kind_count(&h, &run, "RunResumed").await, 3);
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn wait_deadline_follows_timeout_edge() {
+    let clock = Arc::new(ManualClock::new(T0));
+    let h = start(
+        Arc::new(MemoryStore::new()),
+        clock.clone(),
+        fixtures::wait_with_deadline(5_000_000),
+        fast_config(),
+        &[("a", handler(|_, _| async { done() }))],
+    )
+    .await;
+    let run = h.start_run(&"wait".into(), Value::Null).await.unwrap();
+    parked(&h, &run).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    parked(&h, &run).await;
+    let _ = clock.advance(5_000_000);
+    assert_eq!(
+        h.wait_quiescent(&run, Duration::from_secs(2))
+            .await
+            .unwrap(),
+        Quiescent::Parked
+    );
+    eventually("timeout ends run", || async {
+        h.run(&run).await.unwrap().unwrap().status == RunStatus::Failed
+    })
+    .await;
+    assert_eq!(kind_count(&h, &run, "SignalTimedOut").await, 1);
+    assert_eq!(kind_count(&h, &run, "SignalReceived").await, 0);
+    assert!(matches!(
+        h.signal(&run, "gate", payload("ok")).await,
+        Err(EngineError::SignalNotFound { .. })
+    ));
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn cancel_while_parked_resolves_signal() {
+    let store = Arc::new(MemoryStore::new());
+    let h = loop_engine(store.clone(), Arc::new(ManualClock::new(T0)), fast_config()).await;
+    let run = h.start_run(&"loop".into(), Value::Null).await.unwrap();
+    parked(&h, &run).await;
+    h.cancel(&run, "stop").await.unwrap();
+    assert_eq!(
+        h.wait_quiescent(&run, Duration::from_secs(1))
+            .await
+            .unwrap(),
+        Quiescent::Terminal(RunStatus::Cancelled)
+    );
+    assert!(matches!(
+        h.signal(&run, "signoff", payload("approved")).await,
+        Err(EngineError::SignalNotFound { .. })
+    ));
+    assert!(matches!(
+        h.cancel(&run, "again").await,
+        Err(EngineError::RunTerminal {
+            status: RunStatus::Cancelled,
+            ..
+        })
+    ));
+    assert_eq!(h.run(&run).await.unwrap().unwrap().signals, []);
+    assert!(
+        store
+            .find_open_signal(&run, "signoff")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        store
+            .load_task(&task_id(&run, "signoff"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskStatus::Cancelled
+    );
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn cancel_during_running_handler_drops_outcome() {
+    let store = Arc::new(MemoryStore::new());
+    let clock = Arc::new(ManualClock::new(T0));
+    let gate = Gate::new();
+    let g = gate.clone();
+    let r = Recorder::default();
+    let rec = r.clone();
+    let h = start(
+        store.clone(),
+        clock.clone(),
+        fixtures::linear(),
+        fast_config(),
+        &[
+            (
+                "a",
+                handler(move |ctx, _| {
+                    let g = g.clone();
+                    let r = rec.clone();
+                    async move {
+                        r.record(ctx.clone());
+                        g.wait().await;
+                        assert!(ctx.cancel.is_cancelled());
+                        done()
+                    }
+                }),
+            ),
+            ("b", handler(|_, _| async { panic!("b must never run") })),
+        ],
+    )
+    .await;
+    let run = h.start_run(&"linear".into(), Value::Null).await.unwrap();
+    eventually("running a", || async { r.count() == 1 }).await;
+    h.cancel(&run, "stop").await.unwrap();
+    assert!(r.entries()[0].cancel.is_cancelled());
+    gate.open();
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let _ = clock.advance(10_000_001);
+    eventually("terminal lease cleanup", || async {
+        store
+            .load_task(&task_id(&run, "a"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            == TaskStatus::Cancelled
+    })
+    .await;
+    assert_eq!(kind_count(&h, &run, "TaskCompleted").await, 0);
+    let records = h.events(&run, 0, 100).await.unwrap();
+    let cancel_seq = records
+        .iter()
+        .find(|e| matches!(e.event, RunEvent::RunCancelled { .. }))
+        .unwrap()
+        .seq;
+    assert!(
+        !records
+            .iter()
+            .any(|e| e.seq > cancel_seq && matches!(e.event, RunEvent::TaskClaimed { .. }))
+    );
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn lease_reclaim_exhaustion_follows_failed_edge() {
+    let store = Arc::new(MemoryStore::new());
+    let clock = Arc::new(ManualClock::new(T0));
+    let r = Recorder::default();
+    let rec = r.clone();
+    let h = start(
+        store.clone(),
+        clock.clone(),
+        fixtures::retry_chain(2),
+        EngineConfig {
+            workers: 1,
+            claim_limit: 4,
+            ..fast_config()
+        },
+        &[(
+            "a",
+            handler(move |ctx, _| {
+                rec.record(ctx);
+                async {
+                    std::future::pending::<()>().await;
+                    done()
+                }
+            }),
+        )],
+    )
+    .await;
+    let run = h.start_run(&"retry".into(), Value::Null).await.unwrap();
+    eventually("first attempt", || async { r.count() == 1 }).await;
+    let _ = clock.advance(10_000_001);
+    eventually("reclaim", || async { r.count() == 2 }).await;
+    let _ = clock.advance(10_000_001);
+    assert_eq!(
+        h.wait_quiescent(&run, Duration::from_secs(5))
+            .await
+            .unwrap(),
+        Quiescent::Terminal(RunStatus::Failed)
+    );
+    assert_eq!(
+        r.entries().iter().map(|c| c.attempt).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert!(
+        store
+            .load_task(&task_id(&run, "a"))
+            .await
+            .unwrap()
+            .unwrap()
+            .planned_at
+            .is_some()
+    );
+    assert!(events(&h, &run).await.iter().any(|e| matches!(
+        e,
+        RunEvent::TaskExhausted {
+            reason: ExhaustReason::LeaseReclaimsExceeded,
+            ..
+        }
+    )));
+    h.abort().await;
+}
+fn wait_start_graph(deadline: Option<i64>) -> Graph {
+    let builder = GraphBuilder::new("x", 1)
+        .start("w")
+        .wait("w", "go", deadline)
+        .task("t")
+        .end("done", EndStatus::Completed)
+        .edge_on("w", "t", "ok")
+        .edge("t", "done");
+    if deadline.is_some() {
+        builder.edge_on("w", "t", "timeout").build().unwrap()
+    } else {
+        builder.build().unwrap()
+    }
+}
+#[tokio::test(start_paused = true)]
+async fn worker_less_handle_signals_and_cancels() {
+    let store = Arc::new(MemoryStore::new());
+    let clock = Arc::new(ManualClock::new(T0));
+    let h = start(
+        store.clone(),
+        clock.clone(),
+        wait_start_graph(None),
+        EngineConfig {
+            workers: 0,
+            ..fast_config()
+        },
+        &[],
+    )
+    .await;
+    let run = h.start_run(&"x".into(), Value::Null).await.unwrap();
+    parked(&h, &run).await;
+    h.signal(&run, "go", payload("ok")).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        store
+            .load_task(&task_id(&run, "t"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskStatus::Ready
+    );
+    assert_eq!(kind_count(&h, &run, "TaskClaimed").await, 0);
+    assert_eq!(
+        h.wait_quiescent(&run, Duration::from_millis(100)).await,
+        Err(EngineError::Timeout)
+    );
+    h.cancel(&run, "stop").await.unwrap();
+    h.shutdown(Duration::from_secs(1)).await.unwrap();
+    let cli = Engine::builder()
+        .store(store)
+        .clock(clock)
+        .config(EngineConfig {
+            workers: 0,
+            ..fast_config()
+        })
+        .build()
+        .unwrap()
+        .start()
+        .await
+        .unwrap();
+    assert!(matches!(
+        cli.start_run(&"x".into(), Value::Null).await,
+        Err(EngineError::GraphNotRegistered { .. })
+    ));
+    let run = h.start_run(&"x".into(), Value::Null).await.unwrap();
+    cli.signal(&run, "go", payload("ok")).await.unwrap();
+    cli.cancel(&run, "stop").await.unwrap();
+    cli.shutdown(Duration::from_secs(1)).await.unwrap();
+}
+#[tokio::test(start_paused = true)]
+async fn concurrent_duplicate_signal_resolves_once() {
+    let store = CountingStore::new(Arc::new(MemoryStore::new()));
+    let h = loop_engine(store.clone(), Arc::new(ManualClock::new(T0)), fast_config()).await;
+    let run = h.start_run(&"loop".into(), Value::Null).await.unwrap();
+    parked(&h, &run).await;
+    store.hold_next_load_runs(2);
+    let (a, b) = tokio::join!(
+        h.signal(&run, "signoff", payload("approved")),
+        h.signal(&run, "signoff", payload("approved"))
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert!(matches!(
+        a.as_ref().err().or(b.as_ref().err()),
+        Some(EngineError::SignalNotFound { .. })
+    ));
+    completed(&h, &run).await;
+    assert_eq!(kind_count(&h, &run, "SignalReceived").await, 1);
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn shutdown_waits_for_in_flight_handler() {
+    let store = Arc::new(MemoryStore::new());
+    let gate = Gate::new();
+    let g = gate.clone();
+    let r = Recorder::default();
+    let rec = r.clone();
+    let h = start(
+        store.clone(),
+        Arc::new(ManualClock::new(T0)),
+        fixtures::linear(),
+        fast_config(),
+        &[
+            (
+                "a",
+                handler(move |ctx, _| {
+                    let g = g.clone();
+                    let r = rec.clone();
+                    async move {
+                        r.record(ctx);
+                        g.wait().await;
+                        done()
+                    }
+                }),
+            ),
+            (
+                "b",
+                handler(|_, _| async { panic!("no new claim after shutdown") }),
+            ),
+        ],
+    )
+    .await;
+    let run = h.start_run(&"linear".into(), Value::Null).await.unwrap();
+    eventually("handler started", || async { r.count() == 1 }).await;
+    let drain = h.clone();
+    let shutdown = tokio::spawn(async move { drain.shutdown(Duration::from_secs(10)).await });
+    tokio::task::yield_now().await;
+    gate.open();
+    shutdown.await.unwrap().unwrap();
+    assert_eq!(kind_count(&h, &run, "TaskCompleted").await, 1);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        store
+            .load_task(&task_id(&run, "b"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskStatus::Ready
+    );
+}
+#[tokio::test(start_paused = true)]
+async fn shutdown_cancels_tokens_after_drain() {
+    let r = Recorder::default();
+    let rec = r.clone();
+    let cancelled = Arc::new(Mutex::new(None));
+    let t = cancelled.clone();
+    let h = start(
+        Arc::new(MemoryStore::new()),
+        Arc::new(ManualClock::new(T0)),
+        fixtures::retry_chain(2),
+        fast_config(),
+        &[(
+            "a",
+            handler(move |ctx, _| {
+                let r = rec.clone();
+                let t = t.clone();
+                async move {
+                    r.record(ctx.clone());
+                    ctx.cancel.cancelled().await;
+                    *t.lock().unwrap() = Some(tokio::time::Instant::now());
+                    Err(HandlerError::Retryable("cancelled".into()))
+                }
+            }),
+        )],
+    )
+    .await;
+    let run = h.start_run(&"retry".into(), Value::Null).await.unwrap();
+    eventually("started", || async { r.count() == 1 }).await;
+    let begin = tokio::time::Instant::now();
+    h.shutdown(Duration::from_millis(100)).await.unwrap();
+    assert!(cancelled.lock().unwrap().unwrap() - begin >= Duration::from_millis(100));
+    assert!(events(&h, &run).await.iter().any(|e| matches!(
+        e,
+        RunEvent::TaskFailed {
+            retryable: true,
+            ..
+        }
+    )));
+}
+#[tokio::test(start_paused = true)]
+async fn shutdown_reports_abandoned_handlers() {
+    let store = Arc::new(MemoryStore::new());
+    let r = Recorder::default();
+    let rec = r.clone();
+    let h = start(
+        store.clone(),
+        Arc::new(ManualClock::new(T0)),
+        fixtures::retry_chain(2),
+        EngineConfig {
+            cancel_grace: Duration::from_millis(100),
+            ..fast_config()
+        },
+        &[(
+            "a",
+            handler(move |ctx, _| {
+                rec.record(ctx);
+                async {
+                    std::future::pending::<()>().await;
+                    done()
+                }
+            }),
+        )],
+    )
+    .await;
+    let run = h.start_run(&"retry".into(), Value::Null).await.unwrap();
+    eventually("started", || async { r.count() == 1 }).await;
+    assert_eq!(
+        h.shutdown(Duration::from_millis(100)).await,
+        Err(EngineError::ShutdownTimedOut { abandoned: 1 })
+    );
+    assert_eq!(
+        store
+            .load_task(&task_id(&run, "a"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskStatus::Running
+    );
+    h.shutdown(Duration::from_secs(1)).await.unwrap();
+}
+#[tokio::test(start_paused = true)]
+async fn sweeps_act_on_unregistered_graphs() {
+    let store = Arc::new(MemoryStore::new());
+    let clock = Arc::new(ManualClock::new(T0));
+    let a = start(
+        store.clone(),
+        clock.clone(),
+        wait_start_graph(Some(5_000_000)),
+        EngineConfig {
+            workers: 0,
+            ..fast_config()
+        },
+        &[],
+    )
+    .await;
+    let run = a.start_run(&"x".into(), Value::Null).await.unwrap();
+    parked(&a, &run).await;
+    let b = start(
+        store.clone(),
+        clock.clone(),
+        fixtures::linear(),
+        fast_config(),
+        &[
+            ("a", handler(|_, _| async { done() })),
+            ("b", handler(|_, _| async { done() })),
+        ],
+    )
+    .await;
+    let _ = clock.advance(5_000_000);
+    eventually("foreign sweep", || async {
+        kind_count(&b, &run, "SignalTimedOut").await == 1
+    })
+    .await;
+    assert_eq!(
+        store
+            .load_task(&task_id(&run, "t"))
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskStatus::Ready
+    );
+    assert_eq!(kind_count(&b, &run, "TaskClaimed").await, 0);
+    a.abort().await;
+    b.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn signal_after_ambiguous_backend_error_is_indeterminate() {
+    let store = CountingStore::new(Arc::new(MemoryStore::new()));
+    let h = loop_engine(store.clone(), Arc::new(ManualClock::new(T0)), fast_config()).await;
+    let run = h.start_run(&"loop".into(), Value::Null).await.unwrap();
+    parked(&h, &run).await;
+    store.script("apply", vec![Fault::After]);
+    assert!(matches!(
+        h.signal(&run, "signoff", payload("approved")).await,
+        Err(EngineError::Indeterminate { .. })
+    ));
+    completed(&h, &run).await;
+    assert_eq!(kind_count(&h, &run, "SignalReceived").await, 1);
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn cancel_after_ambiguous_backend_error_succeeds() {
+    let store = CountingStore::new(Arc::new(MemoryStore::new()));
+    let h = loop_engine(store.clone(), Arc::new(ManualClock::new(T0)), fast_config()).await;
+    let run = h.start_run(&"loop".into(), Value::Null).await.unwrap();
+    parked(&h, &run).await;
+    store.script("apply", vec![Fault::After]);
+    h.cancel(&run, "stop").await.unwrap();
+    assert_eq!(kind_count(&h, &run, "RunCancelled").await, 1);
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn progress_is_wake_driven() {
+    let h = loop_engine(
+        Arc::new(MemoryStore::new()),
+        Arc::new(ManualClock::new(T0)),
+        EngineConfig {
+            poll_interval: Duration::from_secs(3600),
+            ..fast_config()
+        },
+    )
+    .await;
+    let begin = tokio::time::Instant::now();
+    let run = h.start_run(&"loop".into(), Value::Null).await.unwrap();
+    parked(&h, &run).await;
+    h.signal(&run, "signoff", payload("approved"))
+        .await
+        .unwrap();
+    completed(&h, &run).await;
+    assert!(begin.elapsed() < Duration::from_secs(1));
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn store_errors_do_not_stop_workers() {
+    let store = CountingStore::new(Arc::new(MemoryStore::new()));
+    store.script(
+        "claim_ready",
+        vec![Fault::Instead(StoreError::Busy); 3]
+            .into_iter()
+            .chain(vec![Fault::Instead(StoreError::Backend("io".into())); 2])
+            .collect(),
+    );
+    store.script(
+        "due_signals",
+        vec![Fault::Instead(StoreError::Backend("io".into()))],
+    );
+    store.script("apply", vec![Fault::Instead(StoreError::Busy); 2]);
+    let clock = Arc::new(ManualClock::new(T0));
+    let r = Recorder::default();
+    let rec = r.clone();
+    let h = start(
+        store.clone(),
+        clock.clone(),
+        fixtures::wait_with_deadline(5_000_000),
+        fast_config(),
+        &[(
+            "a",
+            handler(move |ctx, _| {
+                rec.record(ctx);
+                async { done() }
+            }),
+        )],
+    )
+    .await;
+    let run = h.start_run(&"wait".into(), Value::Null).await.unwrap();
+    parked(&h, &run).await;
+    let _ = clock.advance(5_000_000);
+    eventually("deadline recovered", || async {
+        h.run(&run).await.unwrap().unwrap().status == RunStatus::Failed
+    })
+    .await;
+    assert_eq!(r.count(), 1);
+    assert!(store.calls("claim_ready") > 5);
+    h.abort().await;
+}

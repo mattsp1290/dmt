@@ -22,8 +22,6 @@ pub(crate) struct Shared {
     pub tracker: TaskTracker,
     pub in_flight: Mutex<BTreeMap<(TaskId, u32), InFlight>>,
 }
-// Run cancellation consumes these fields in the next work package.
-#[allow(dead_code)]
 pub(crate) struct InFlight {
     pub run_id: RunId,
     pub cancel: CancellationToken,

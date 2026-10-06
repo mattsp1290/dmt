@@ -138,3 +138,132 @@ impl EngineHandle {
         &self.inner.shared.config.worker_id
     }
 }
+
+impl EngineHandle {
+    /// Atomically resolve an open signal and complete its waiting task.
+    /// The host is responsible for authorizing the request.
+    /// # Errors
+    /// Returns an absent signal, terminal run, store/planner error, contention,
+    /// or `Indeterminate` when an earlier backend error may hide a committed resolution.
+    pub async fn signal(
+        &self,
+        run_id: &RunId,
+        name: &str,
+        payload: dmt_core::SignalPayload,
+    ) -> Result<(), EngineError> {
+        use dmt_core::PlanError;
+        let report = commit_loop::unowned(
+            &self.inner.shared,
+            run_id,
+            commit_loop::Operation::Signal {
+                name,
+                payload: &payload,
+            },
+        )
+        .await;
+        let result = match report.result {
+            Err(
+                EngineError::RunNotFound { .. }
+                | EngineError::SignalNotFound { .. }
+                | EngineError::Plan(
+                    PlanError::UnknownSignal { .. }
+                    | PlanError::SignalResolved { .. }
+                    | PlanError::TaskNotAwaiting { .. },
+                )
+                | EngineError::Store(StoreError::AlreadyResolved { .. }),
+            ) => Err(EngineError::SignalNotFound {
+                run_id: run_id.clone(),
+                name: name.into(),
+            }),
+            other => self.terminal_error(run_id, other).await,
+        };
+        if matches!(
+            result,
+            Err(EngineError::SignalNotFound { .. } | EngineError::RunTerminal { .. })
+        ) && let Some(last) = report.ambiguous
+        {
+            return Err(EngineError::Indeterminate { last });
+        }
+        result
+    }
+    /// Cancel a run and notify its locally registered handler tokens.
+    /// The host is responsible for authorizing the request.
+    /// # Errors
+    /// Returns an absent/terminal run, planner/store error, or contention.
+    /// # Panics
+    /// Panics if an internal in-flight registry lock was poisoned.
+    pub async fn cancel(
+        &self,
+        run_id: &RunId,
+        reason: impl Into<String>,
+    ) -> Result<(), EngineError> {
+        let reason = reason.into();
+        let report = commit_loop::unowned(
+            &self.inner.shared,
+            run_id,
+            commit_loop::Operation::Cancel(&reason),
+        )
+        .await;
+        let result = self.terminal_error(run_id, report.result).await;
+        if result.is_ok()
+            || (report.ambiguous.is_some()
+                && matches!(
+                    result,
+                    Err(EngineError::RunTerminal {
+                        status: RunStatus::Cancelled,
+                        ..
+                    })
+                ))
+        {
+            let tokens: Vec<_> = self
+                .inner
+                .shared
+                .in_flight
+                .lock()
+                .expect("in-flight lock poisoned")
+                .values()
+                .filter(|f| &f.run_id == run_id)
+                .map(|f| f.cancel.clone())
+                .collect();
+            for token in tokens {
+                token.cancel();
+            }
+            return Ok(());
+        }
+        result
+    }
+    async fn terminal_error(
+        &self,
+        run_id: &RunId,
+        result: Result<(), EngineError>,
+    ) -> Result<(), EngineError> {
+        match result {
+            Err(EngineError::Plan(dmt_core::PlanError::RunTerminal { status })) => {
+                Err(EngineError::RunTerminal {
+                    run_id: run_id.clone(),
+                    status,
+                })
+            }
+            Err(EngineError::Store(StoreError::RunTerminal { .. })) => {
+                let run = self
+                    .run(run_id)
+                    .await?
+                    .ok_or_else(|| EngineError::RunNotFound {
+                        run_id: run_id.clone(),
+                    })?;
+                Err(EngineError::RunTerminal {
+                    run_id: run_id.clone(),
+                    status: run.status,
+                })
+            }
+            other => other,
+        }
+    }
+    /// Stop claiming/sweeping, drain, cancel handlers, then stop hard if needed.
+    /// After return this handle continues to serve host/store operations without workers.
+    /// # Errors
+    /// Returns `ShutdownTimedOut` when dispatches exceeded drain and cancellation grace.
+    pub async fn shutdown(&self, drain: Duration) -> Result<(), EngineError> {
+        shutdown::graceful(&self.inner.shared, drain).await
+    }
+}

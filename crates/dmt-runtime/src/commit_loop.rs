@@ -127,31 +127,61 @@ fn plan_with_downgrade(
         result => result,
     }
 }
-// Unowned operations are wired to signals, cancel, and sweeps in WP3.
-#[allow(dead_code)]
+
 pub(crate) struct Unowned {
     pub result: Result<(), EngineError>,
     pub ambiguous: Option<StoreError>,
 }
-// Kept in the core commit package so every unowned operation shares the retry bound.
-#[allow(dead_code)]
-pub(crate) async fn unowned<F>(shared: &Shared, run_id: &dmt_core::RunId, plan: F) -> Unowned
-where
-    F: Fn(&Graph, &RunSnapshot, Micros) -> Result<Commit, PlanError>,
-{
-    let mut ambiguous = None;
-    let result = unowned_loop(shared, run_id, plan, &mut ambiguous).await;
-    Unowned { result, ambiguous }
+pub(crate) enum Operation<'a> {
+    Signal {
+        name: &'a str,
+        payload: &'a dmt_core::SignalPayload,
+    },
+    Cancel(&'a str),
+    Timeout(&'a dmt_core::SignalId),
+    Exhausted(&'a TaskId),
 }
-async fn unowned_loop<F>(
+impl Operation<'_> {
+    async fn plan(
+        &self,
+        shared: &Shared,
+        graph: &Graph,
+        snapshot: &RunSnapshot,
+    ) -> Result<Commit, EngineError> {
+        let now = shared.clock.now();
+        Ok(match self {
+            Self::Signal { name, payload } => {
+                let signal = shared
+                    .store
+                    .find_open_signal(&snapshot.run_id, name)
+                    .await?
+                    .ok_or_else(|| EngineError::SignalNotFound {
+                        run_id: snapshot.run_id.clone(),
+                        name: (*name).into(),
+                    })?;
+                dmt_core::plan_signal(graph, snapshot, &signal.signal_id, (*payload).clone(), now)?
+            }
+            Self::Cancel(reason) => dmt_core::plan_cancel(graph, snapshot, (*reason).into(), now)?,
+            Self::Timeout(signal) => dmt_core::plan_timeout(graph, snapshot, signal, now)?,
+            Self::Exhausted(task) => dmt_core::plan_exhausted(graph, snapshot, task, now)?,
+        })
+    }
+}
+pub(crate) async fn unowned(
     shared: &Shared,
     run_id: &dmt_core::RunId,
-    plan: F,
+    operation: Operation<'_>,
+) -> Unowned {
+    let mut ambiguous = None;
+    let result = unowned_loop(shared, run_id, &operation, &mut ambiguous).await;
+    Unowned { result, ambiguous }
+}
+async fn unowned_loop(
+    shared: &Shared,
+    run_id: &dmt_core::RunId,
+    operation: &Operation<'_>,
     ambiguous: &mut Option<StoreError>,
-) -> Result<(), EngineError>
-where
-    F: Fn(&Graph, &RunSnapshot, Micros) -> Result<Commit, PlanError>,
-{
+) -> Result<(), EngineError> {
     let mut last = StoreError::Busy;
     for retry in 0..=shared.config.max_replan_attempts {
         delay(shared, retry).await;
@@ -184,7 +214,14 @@ where
             }
             Err(e) => return Err(e),
         };
-        let commit = plan(&graph, &snapshot, shared.clock.now())?;
+        let commit = match operation.plan(shared, &graph, &snapshot).await {
+            Ok(c) => c,
+            Err(EngineError::Store(e)) if transient(&e) => {
+                last = e;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         match shared.store.apply(commit, None).await {
             Ok(_) => {
                 shared.wake.notify_waiters();
