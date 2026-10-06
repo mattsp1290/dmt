@@ -22,3 +22,33 @@ pub async fn fresh(db: &TempDb) -> SqliteStore {
         .await
         .unwrap()
 }
+
+use async_trait::async_trait;
+use dmt_store_conformance::StoreFactory;
+use std::sync::atomic::{AtomicUsize, Ordering};
+pub struct SqliteFactory {
+    root: tempfile::TempDir,
+    next: AtomicUsize,
+}
+impl SqliteFactory {
+    pub fn new() -> Self {
+        Self {
+            root: tempfile::tempdir().unwrap(),
+            next: AtomicUsize::new(0),
+        }
+    }
+}
+#[async_trait]
+impl StoreFactory for SqliteFactory {
+    type S = SqliteStore;
+    async fn fresh(&self) -> Self::S {
+        let index = self.next.fetch_add(1, Ordering::Relaxed);
+        let path = self.root.path().join(format!("case-{index}.db"));
+        SqliteStore::migrate(&path)
+            .await
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        SqliteStore::open(&path, SqliteOptions::default())
+            .await
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    }
+}

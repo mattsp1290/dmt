@@ -5,6 +5,12 @@ use dmt_store::StoreError;
 pub(crate) fn map_sqlx(error: sqlx::Error) -> StoreError {
     // SQLITE_BUSY is primary result code 5; extended codes retain its low byte.
     const SQLITE_BUSY: u32 = 5;
+    if matches!(
+        error,
+        sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_)
+    ) {
+        return crate::codec::corrupt(error);
+    }
     let busy = match &error {
         sqlx::Error::PoolTimedOut => true,
         sqlx::Error::Database(db) => db

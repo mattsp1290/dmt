@@ -1,7 +1,15 @@
 //! Durable SQLite persistence for dmt.
+mod apply;
+mod checks;
+mod claim;
+mod codec;
 mod error;
 mod options;
+mod read;
 mod sql;
+mod store_impl;
+mod tx;
+mod writes;
 
 use dmt_store::StoreError;
 use error::map_sqlx;
@@ -53,7 +61,7 @@ impl SqliteStore {
             .await
             .map_err(map_sqlx)?;
         let result = MIGRATOR
-            .run(&mut connection)
+            .run_direct(None, &mut connection, false)
             .await
             .map_err(|error| StoreError::Backend(error.to_string()));
         let close = connection.close().await.map_err(map_sqlx);

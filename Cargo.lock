@@ -284,6 +284,7 @@ dependencies = [
  "async-trait",
  "dmt-core",
  "dmt-store",
+ "dmt-store-conformance",
  "serde_json",
  "sqlx",
  "tempfile",
