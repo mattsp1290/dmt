@@ -2,7 +2,7 @@ use crate::{
     SqliteStore, apply, claim,
     codec::{self, EventRow, SignalRow, SummaryRow, TaskRow},
     error::map_sqlx,
-    read, sql,
+    read, sql, writes,
 };
 use async_trait::async_trait;
 use dmt_core::{
@@ -16,7 +16,7 @@ use dmt_store::{
 #[async_trait]
 impl Store for SqliteStore {
     async fn register_graph(&self, graph: &Graph) -> Result<(), StoreError> {
-        read::register(self, graph).await
+        writes::register(self, graph).await
     }
     async fn load_graph(&self, id: &GraphId, version: u32) -> Result<Option<Graph>, StoreError> {
         let json: Option<String> = sqlx::query_scalar(sql::SELECT_GRAPH_JSON)
@@ -58,7 +58,7 @@ impl Store for SqliteStore {
         now: Micros,
         lease_micros: i64,
     ) -> Result<HeartbeatResult, StoreError> {
-        read::heartbeat(self, proof, now, lease_micros).await
+        writes::heartbeat(self, proof, now, lease_micros).await
     }
     async fn find_open_signal(
         &self,

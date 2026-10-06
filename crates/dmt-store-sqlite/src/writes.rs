@@ -1,10 +1,11 @@
 use crate::{
+    SqliteStore,
     codec::{Head, i64_from},
     sql,
     tx::WriteTx,
 };
-use dmt_core::{BranchResult, Commit, JoinId, Micros, RunEvent, RunId};
-use dmt_store::{ApplyResult, StoreError};
+use dmt_core::{BranchResult, Commit, Graph, JoinId, Micros, RunEvent, RunId};
+use dmt_store::{ApplyResult, HeartbeatResult, LeaseProof, StoreError};
 use sqlx::types::Json;
 
 pub(crate) async fn mutate(
@@ -207,4 +208,66 @@ pub(crate) async fn append_event(
     )
     .await?;
     Ok(())
+}
+
+pub(crate) async fn register(store: &SqliteStore, graph: &Graph) -> Result<(), StoreError> {
+    let mut tx = WriteTx::begin(store).await?;
+    let hash: Option<(String,)> = tx
+        .fetch_optional(
+            sqlx::query_as(sql::SELECT_GRAPH_HASH)
+                .bind(graph.id().as_str())
+                .bind(i64::from(graph.version())),
+        )
+        .await?;
+    if let Some((hash,)) = hash {
+        return if hash == graph.definition_hash() {
+            Ok(())
+        } else {
+            Err(StoreError::GraphMismatch {
+                graph_id: graph.id().clone(),
+                version: graph.version(),
+            })
+        };
+    }
+    tx.execute(
+        sqlx::query(sql::INSERT_GRAPH)
+            .bind(graph.id().as_str())
+            .bind(i64::from(graph.version()))
+            .bind(graph.definition_hash())
+            .bind(Json(graph)),
+    )
+    .await?;
+    tx.commit().await
+}
+
+pub(crate) async fn heartbeat(
+    store: &SqliteStore,
+    proof: &LeaseProof,
+    now: dmt_core::Micros,
+    lease_micros: i64,
+) -> Result<HeartbeatResult, StoreError> {
+    let mut tx = WriteTx::begin(store).await?;
+    let lease_until = now.saturating_add(lease_micros);
+    if tx
+        .execute(
+            sqlx::query(sql::HEARTBEAT)
+                .bind(proof.task_id.as_str())
+                .bind(lease_until.0)
+                .bind(now.0)
+                .bind(proof.worker_id.as_str())
+                .bind(i64::from(proof.attempt)),
+        )
+        .await?
+        == 1
+    {
+        tx.commit().await?;
+        return Ok(HeartbeatResult::Extended { lease_until });
+    }
+    let exists: Option<(i64,)> = tx
+        .fetch_optional(sqlx::query_as(sql::TASK_EXISTS).bind(proof.task_id.as_str()))
+        .await?;
+    if exists.is_none() {
+        return Err(StoreError::NotFound(format!("task {}", proof.task_id)));
+    }
+    Ok(HeartbeatResult::Lost)
 }
