@@ -8,7 +8,7 @@ use crate::{
 use async_trait::async_trait;
 use dmt_core::{
     Commit, Graph, GraphId, JoinId, JoinRecord, Micros, RunEvent, RunId, RunSnapshot, SignalId,
-    SignalRecord, StepKey, TaskId, TaskRecord, TaskStatus,
+    SignalRecord, TaskId, TaskRecord, TaskStatus,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -23,7 +23,6 @@ struct Inner {
     graphs: BTreeMap<(GraphId, u32), Graph>,
     runs: BTreeMap<RunId, RunRow>,
     tasks: BTreeMap<TaskId, TaskRecord>,
-    by_step: BTreeMap<StepKey, TaskId>,
     joins: BTreeMap<JoinId, JoinRecord>,
     signals: BTreeMap<SignalId, SignalRecord>,
 }

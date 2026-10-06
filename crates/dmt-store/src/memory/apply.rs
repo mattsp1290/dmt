@@ -203,14 +203,12 @@ fn mutate(inner: &mut Inner, commit: Commit) -> ApplyResult {
             clear_lease(task);
         }
     }
+    // Validated task ids equal their step keys, so the task map also owns step uniqueness.
     for task in commit.new_tasks {
-        if inner.by_step.contains_key(&task.step_key) {
+        if inner.tasks.contains_key(&task.task_id) {
             result.ignored_tasks.push(task.step_key);
             continue;
         }
-        inner
-            .by_step
-            .insert(task.step_key.clone(), task.task_id.clone());
         result.inserted_tasks.push(task.task_id.clone());
         inner.tasks.insert(
             task.task_id.clone(),
