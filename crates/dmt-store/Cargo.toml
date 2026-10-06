@@ -1,0 +1,19 @@
+[package]
+name = "dmt-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Persistence contract, clocks, and in-memory store for dmt"
+
+[dependencies]
+dmt-core = { path = "../dmt-core" }
+async-trait.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true          # Value fields in MemoryStore rows (machine_json, input, output, signal payload)
+
+[dev-dependencies]
+dmt-core = { path = "../dmt-core", features = ["fixtures"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
