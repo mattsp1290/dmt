@@ -1,3 +1,4 @@
+use crate::harness::required;
 use crate::{
     StoreFactory,
     harness::{
@@ -22,7 +23,10 @@ pub async fn case_wait_loop<F: StoreFactory>(factory: &F) {
         ok(CASE, complete(CASE, &store, &graph, &a, done(), T0).await);
         let s = snapshot(CASE, &store, &run).await;
         assert_eq!(s.status, RunStatus::Parked, "{CASE}: park occurrence {i}");
-        let signal = ok(CASE, store.find_open_signal(&run, "signoff").await).unwrap();
+        let signal = required(
+            CASE,
+            ok(CASE, store.find_open_signal(&run, "signoff").await),
+        );
         assert_eq!(
             signal.key,
             SignalKey::new("signoff", i),

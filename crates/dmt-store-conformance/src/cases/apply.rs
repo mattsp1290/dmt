@@ -1,3 +1,4 @@
+use crate::harness::{at, required};
 use crate::{
     StoreFactory,
     harness::{
@@ -262,12 +263,17 @@ pub async fn case_insert_or_ignore<F: StoreFactory>(factory: &F) {
     );
     let a = claim_one(CASE, &store, "w1", T0, &graph, &task_id(&run, "a", 0)).await;
     let mut commit = plan_done(CASE, &store, &graph, &a.task.task_id, "ok", T0).await;
+    super::validation::task_identity(CASE, &store, &commit, &a.proof).await;
+    let child = at(CASE, &commit.new_tasks, 0).clone();
+    let mut duplicate = child.clone();
+    duplicate.input = json!("second copy must not overwrite");
+    commit.new_tasks.push(duplicate);
     commit.new_tasks.extend(start.new_tasks);
     commit.events.push(start.events[1].clone());
     let result = ok(CASE, store.apply(commit, Some(a.proof)).await);
     assert_eq!(
         result.ignored_tasks,
-        vec![a.task.step_key],
+        vec![child.step_key, a.task.step_key],
         "{CASE}: ignored keys"
     );
     assert_eq!(
@@ -276,6 +282,11 @@ pub async fn case_insert_or_ignore<F: StoreFactory>(factory: &F) {
         "{CASE}: inserted tasks"
     );
     assert_eq!(result.run_version, 2, "{CASE}: version");
+    assert_eq!(
+        task(CASE, &store, &child.task_id).await.input,
+        child.input,
+        "{CASE}: first insert must win"
+    );
     let a = task(CASE, &store, &a.task.task_id).await;
     assert_eq!(
         a.status,
@@ -303,6 +314,8 @@ pub async fn case_insert_or_ignore<F: StoreFactory>(factory: &F) {
 pub async fn case_join_guard<F: StoreFactory>(factory: &F) {
     join_all(factory).await;
     join_late(factory).await;
+    super::validation::failed_join(factory).await;
+    super::validation::duplicate_join(factory).await;
 }
 async fn join_all<F: StoreFactory>(factory: &F) {
     const CASE: &str = "join_guard";
@@ -321,7 +334,7 @@ async fn join_all<F: StoreFactory>(factory: &F) {
         plan_outcome(&graph, &s, &claimed[1].task.task_id, done(), T0),
     );
     let mut drift = c0.clone();
-    drift.join_contribution.as_mut().unwrap().expected_received = 2;
+    required(CASE, drift.join_contribution.as_mut()).expected_received = 2;
     assert!(
         matches!(
             store.apply(drift, Some(claimed[0].proof.clone())).await,
@@ -343,9 +356,9 @@ async fn join_all<F: StoreFactory>(factory: &F) {
     let s1 = snapshot(CASE, &store, &run).await;
     assert_eq!(
         (
-            s1.joins[0].received,
-            s1.joins[0].results.len(),
-            s1.joins[0].satisfied_at
+            at(CASE, &s1.joins, 0).received,
+            at(CASE, &s1.joins, 0).results.len(),
+            at(CASE, &s1.joins, 0).satisfied_at
         ),
         (1, 1, None),
         "{CASE}: first counters"
@@ -367,12 +380,15 @@ async fn join_all<F: StoreFactory>(factory: &F) {
     );
     assert_eq!(
         ok(CASE, store.apply(c, Some(claimed[1].proof.clone())).await).join_satisfied,
-        Some(s.joins[0].join_id.clone()),
+        Some(at(CASE, &s.joins, 0).join_id.clone()),
         "{CASE}: satisfaction result"
     );
     let s2 = snapshot(CASE, &store, &run).await;
     assert_eq!(
-        (s2.joins[0].received, s2.joins[0].satisfied_at),
+        (
+            at(CASE, &s2.joins, 0).received,
+            at(CASE, &s2.joins, 0).satisfied_at
+        ),
         (2, Some(T0)),
         "{CASE}: satisfaction timestamp"
     );
@@ -395,6 +411,7 @@ async fn join_late<F: StoreFactory>(factory: &F) {
     let graph = fixtures::fan_out(JoinPolicy::Quorum(1));
     let run = branches(CASE, &store, &graph, "run-2", 2).await;
     let claimed = claim_all(CASE, &store, "w1", T0, &graph).await;
+    assert_eq!(claimed.len(), 2, "{CASE}: branches");
     ok(
         CASE,
         complete(CASE, &store, &graph, &claimed[0], done(), T0).await,
@@ -407,7 +424,7 @@ async fn join_late<F: StoreFactory>(factory: &F) {
     let before = snapshot(CASE, &store, &run).await;
     let mut forced = late.clone();
     forced.join_contribution = Some(JoinContribution {
-        join_id: before.joins[0].join_id.clone(),
+        join_id: at(CASE, &before.joins, 0).join_id.clone(),
         result: BranchResult::Done {
             index: 1,
             outcome: Outcome::with_payload("ok", json!(1)),
@@ -434,7 +451,10 @@ async fn join_late<F: StoreFactory>(factory: &F) {
     );
     let after = snapshot(CASE, &store, &run).await;
     assert_eq!(
-        (after.joins[0].received, after.joins[0].results.len()),
+        (
+            at(CASE, &after.joins, 0).received,
+            at(CASE, &after.joins, 0).results.len()
+        ),
         (1, 1),
         "{CASE}: late counters"
     );
@@ -456,6 +476,7 @@ async fn join_late<F: StoreFactory>(factory: &F) {
 /// Panics with the case name when the backend violates the contract.
 pub async fn case_signal_resolution<F: StoreFactory>(factory: &F) {
     const CASE: &str = "signal_resolution";
+    super::validation::duplicate_signals(factory).await;
     let store = factory.fresh().await;
     let graph = fixtures::loop_via_wait();
     let run = start_run(CASE, &store, &graph, "run-1", T0).await;
@@ -473,7 +494,10 @@ pub async fn case_signal_resolution<F: StoreFactory>(factory: &F) {
         TaskStatus::Awaiting,
         "{CASE}: awaiting task"
     );
-    let signal = ok(CASE, store.find_open_signal(&run, "signoff").await).unwrap();
+    let signal = required(
+        CASE,
+        ok(CASE, store.find_open_signal(&run, "signoff").await),
+    );
     assert_eq!(
         signal.key,
         dmt_core::SignalKey::new("signoff", 0),

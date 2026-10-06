@@ -2,7 +2,7 @@
 //!
 //!
 //!
-//! Every backend, `MemoryStore` included, must satisfy the following. Each numbered rule maps to one conformance case in [03-conformance-suite.md](03-conformance-suite.md).
+//! Every backend, `MemoryStore` included, must satisfy the following. The `dmt-store-conformance` crate exports named cases for these rules.
 //!
 //! ### Graphs and runs
 //!
@@ -41,7 +41,7 @@
 //! 10. Set `run.version = expected_run_version + 1` and `updated_at = commit.now`.
 //! 11. Return `ApplyResult { run_version, inserted_tasks, ignored_tasks, join_satisfied }`.
 //!
-//! The store does not call `Commit::check` (planner responsibility; refinement 9 in [00-overview.md](00-overview.md)).
+//! The store does not call `Commit::check`; the planner owns that validation.
 //!
 //! ### `claim_ready(req)` (rule 7)
 //!

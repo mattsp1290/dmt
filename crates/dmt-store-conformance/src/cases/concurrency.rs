@@ -1,3 +1,4 @@
+use crate::harness::at;
 use crate::{
     StoreFactory,
     harness::{
@@ -118,12 +119,15 @@ pub async fn case_concurrent_join<F: StoreFactory>(factory: &F) {
     );
     let s = snapshot(CASE, store.as_ref(), &run).await;
     assert_eq!(
-        (s.joins[0].received, s.joins[0].results.len()),
+        (
+            at(CASE, &s.joins, 0).received,
+            at(CASE, &s.joins, 0).results.len()
+        ),
         (3, 3),
         "{CASE}: join counters"
     );
     assert!(
-        s.joins[0].satisfied_at.is_some(),
+        at(CASE, &s.joins, 0).satisfied_at.is_some(),
         "{CASE}: join unsatisfied"
     );
     let ev = events(CASE, store.as_ref(), &run).await;

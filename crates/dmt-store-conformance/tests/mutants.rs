@@ -21,6 +21,9 @@ enum Fault {
     TerminalBeforeVersionSwapped,
     DropClaimEvents,
     DuplicateClaim,
+    HideSignalLookup,
+    HideSnapshotSignals,
+    HideJoins,
 }
 struct Mutant {
     inner: MemoryStore,
@@ -51,7 +54,16 @@ impl Store for Mutant {
         self.inner.create_run(commit).await
     }
     async fn load_run(&self, run_id: &RunId) -> Result<Option<RunSnapshot>, StoreError> {
-        self.inner.load_run(run_id).await
+        let mut snapshot = self.inner.load_run(run_id).await?;
+        if let Some(view) = &mut snapshot {
+            if matches!(self.fault, Fault::HideSnapshotSignals) {
+                view.signals.clear();
+            }
+            if matches!(self.fault, Fault::HideJoins) {
+                view.joins.clear();
+            }
+        }
+        Ok(snapshot)
     }
     async fn load_task(&self, task_id: &TaskId) -> Result<Option<TaskRecord>, StoreError> {
         self.inner.load_task(task_id).await
@@ -131,6 +143,9 @@ impl Store for Mutant {
         run_id: &RunId,
         name: &str,
     ) -> Result<Option<SignalRecord>, StoreError> {
+        if matches!(self.fault, Fault::HideSignalLookup) {
+            return Ok(None);
+        }
         self.inner.find_open_signal(run_id, name).await
     }
     async fn due_signals(
@@ -201,4 +216,20 @@ async fn mutant_event_sequence() {
 #[should_panic(expected = "concurrent_claims")]
 async fn mutant_concurrent_claims() {
     case_concurrent_claims(&MutantFactory(Fault::DuplicateClaim)).await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "wait_loop")]
+async fn hidden_signal_lookup_names_case() {
+    dmt_store_conformance::case_wait_loop(&MutantFactory(Fault::HideSignalLookup)).await;
+}
+#[tokio::test]
+#[should_panic(expected = "micros_ordering")]
+async fn hidden_snapshot_signal_names_case() {
+    dmt_store_conformance::case_micros_ordering(&MutantFactory(Fault::HideSnapshotSignals)).await;
+}
+#[tokio::test]
+#[should_panic(expected = "join_guard")]
+async fn hidden_join_names_case() {
+    case_join_guard(&MutantFactory(Fault::HideJoins)).await;
 }

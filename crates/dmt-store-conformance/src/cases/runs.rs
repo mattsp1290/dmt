@@ -1,3 +1,4 @@
+use crate::harness::at;
 use crate::{
     StoreFactory,
     harness::{
@@ -83,6 +84,7 @@ pub async fn case_create_run<F: StoreFactory>(factory: &F) {
         ok(CASE, store.list_runs(RunFilter::all(10)).await).is_empty(),
         "{CASE}: failed create summary"
     );
+    super::validation::create_version(CASE, &store, &graph, &start).await;
     ok(CASE, store.register_graph(&graph).await);
     assert_eq!(
         ok(CASE, store.create_run(start.clone()).await),
@@ -275,7 +277,7 @@ pub async fn case_micros_ordering<F: StoreFactory>(factory: &F) {
     );
     let s = snapshot(CASE, &store, &run).await;
     assert_eq!(
-        s.signals[0].deadline_at,
+        at(CASE, &s.signals, 0).deadline_at,
         Some(T0.saturating_add(101)),
         "{CASE}: deadline precision"
     );
@@ -290,7 +292,12 @@ pub async fn case_micros_ordering<F: StoreFactory>(factory: &F) {
     );
     let timeout = ok(
         CASE,
-        plan_timeout(&wait, &s, &s.signals[0].signal_id, T0.saturating_add(101)),
+        plan_timeout(
+            &wait,
+            &s,
+            &at(CASE, &s.signals, 0).signal_id,
+            T0.saturating_add(101),
+        ),
     );
     ok(CASE, store.apply(timeout, None).await);
     assert_eq!(
@@ -327,17 +334,17 @@ pub async fn case_load_run_view<F: StoreFactory>(factory: &F) {
     );
     assert_eq!(s.joins.len(), 1, "{CASE}: satisfied join hidden");
     assert!(
-        s.joins[0].satisfied_at.is_some(),
+        at(CASE, &s.joins, 0).satisfied_at.is_some(),
         "{CASE}: satisfaction hidden"
     );
     assert_eq!(s.signals.len(), 1, "{CASE}: open signal hidden");
     assert_eq!(
-        s.signals[0].signal_id,
+        at(CASE, &s.signals, 0).signal_id,
         signal_id(&run, "gate", 0),
         "{CASE}: signal id"
     );
     assert!(
-        s.signals[0].resolved_at.is_none(),
+        at(CASE, &s.signals, 0).resolved_at.is_none(),
         "{CASE}: open signal state"
     );
     let resolve = ok(
@@ -345,7 +352,7 @@ pub async fn case_load_run_view<F: StoreFactory>(factory: &F) {
         plan_signal(
             &graph,
             &s,
-            &s.signals[0].signal_id,
+            &at(CASE, &s.signals, 0).signal_id,
             SignalPayload {
                 label: "ok".into(),
                 payload: json!(true),

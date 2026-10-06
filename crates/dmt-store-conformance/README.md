@@ -64,7 +64,7 @@ Rule traceability: 1 → apply_atomic; 2 → version_conflict; 3 → lease_proof
 
 ## Mutant tests
 
-[tests/mutants.rs](tests/mutants.rs) demonstrates suite sensitivity with eight wrappers: ignore apply proof, ignore heartbeat attempt, hide ignored task keys, hide reclaim attempt increment, swallow join drift, check version before terminal status, drop claim events, and duplicate concurrent branch claims. Each runs its owning case with `should_panic(expected = "case_name")`. The duplicate wrapper seeds only branch claims so the fault is tested during contention, after valid setup. To cover a new rule, add a wrapper fault and a test that fails with its owning case name; a green reference suite alone cannot prove sensitivity.
+[tests/mutants.rs](tests/mutants.rs) demonstrates suite sensitivity with eight contract faults and three diagnostic faults: ignore apply proof, ignore heartbeat attempt, hide ignored task keys, hide reclaim attempt increment, swallow join drift, check version before terminal status, drop claim events, and duplicate concurrent branch claims. Additional wrappers hide signal lookup, snapshot signals, and join rows to prove missing-data panics carry the case name. Each runs its owning case with `should_panic(expected = "case_name")`. The duplicate wrapper seeds only branch claims so the fault is tested during contention, after valid setup. To cover a new rule, add a wrapper fault and a test that fails with its owning case name; a green reference suite alone cannot prove sensitivity.
 
 ## Harness
 
@@ -75,7 +75,7 @@ Rule traceability: 1 → apply_atomic; 2 → version_conflict; 3 → lease_proof
 - `start_run`, `snapshot`, `task`, `claim_one`, `claim_all`: setup and required-row reads; store helpers accept `S: Store + ?Sized`.
 - `plan_done`, `complete`: plan an outcome against a fresh snapshot, then optionally apply with a proof.
 - `events`, `kinds`, `count`, `assert_contiguous`: event assertions.
-- `ok`: unwrap a result with the case name in its panic.
+- `ok`, `required`, `at`: extract results, optional values, and indexed rows with case-named panics.
 - `retry_busy`: bounded lock-contention retries.
 
 Panicking helpers take the owning case name first. Every claim's time must be at least the task's `run_at`; tests use explicit time advances. Microsecond and strict expiry boundary assertions keep rounding defects visible.

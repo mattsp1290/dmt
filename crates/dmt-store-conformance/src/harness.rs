@@ -277,3 +277,18 @@ pub(crate) async fn exhaust<S: Store + ?Sized>(
     );
     (run, first)
 }
+
+/// Extract a required backend value with its owning case's name.
+/// # Panics
+/// Panics with the case name when the value is absent.
+pub fn required<T>(case: &str, value: Option<T>) -> T {
+    value.unwrap_or_else(|| panic!("{case}: missing required value"))
+}
+/// Index backend data with a case-named diagnostic.
+/// # Panics
+/// Panics with the case name when the row is absent.
+#[must_use]
+pub fn at<'a, T>(case: &str, rows: &'a [T], index: usize) -> &'a T {
+    rows.get(index)
+        .unwrap_or_else(|| panic!("{case}: missing row at index {index}"))
+}
