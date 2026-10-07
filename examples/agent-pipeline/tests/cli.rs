@@ -163,3 +163,21 @@ fn missing_database_exits_1() {
     assert_eq!(out.status.code(), Some(1));
     assert!(!dir.path().join("pipeline.db").exists());
 }
+
+#[test]
+fn parser_errors_are_single_line_and_help_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli::new(dir.path());
+    for args in [vec!["run", "--workers", "nope"], vec![]] {
+        let out = cli.step("parser-error", &args, &[]);
+        assert_eq!(out.status.code(), Some(2));
+        let stderr = out.stderr();
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(stderr.starts_with("error: "));
+        assert!(!stderr.starts_with("error: error: "));
+    }
+    let help = cli.step("help", &["--help"], &[]);
+    help.success();
+    assert!(help.stdout.contains("Usage:"));
+    assert_eq!(help.stderr(), "");
+}

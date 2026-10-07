@@ -21,7 +21,7 @@ fn main() -> ExitCode {
                 print!("{error}");
                 return ExitCode::SUCCESS;
             }
-            eprintln!("error: {error}");
+            report_error(&error);
             return ExitCode::from(2);
         }
     };
@@ -46,11 +46,16 @@ fn main() -> ExitCode {
                 AppError::Engine(EngineError::SignalNotFound { run_id, name }) => {
                     eprintln!("error: no open signal {name} for run {run_id}");
                 }
-                _ => eprintln!("error: {error}"),
+                _ => report_error(&error),
             }
             ExitCode::from(code)
         }
     }
+}
+fn report_error(error: &dyn std::fmt::Display) {
+    let diagnostic = error.to_string();
+    let line = diagnostic.lines().next().unwrap_or("unknown error");
+    eprintln!("error: {}", line.trim_start_matches("error: "));
 }
 fn status_code(status: RunStatus) -> u8 {
     u8::from(status != RunStatus::Completed)
