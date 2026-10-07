@@ -9,6 +9,10 @@ description = "Runnable agent pipeline example with fake handlers and crash inje
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "agent-pipeline"
+path = "src/main.rs"
+
 [dependencies]
 dmt = { path = "../../crates/dmt", features = ["sqlite", "test-faults"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

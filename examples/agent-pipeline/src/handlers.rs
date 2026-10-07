@@ -138,10 +138,17 @@ fn open_pr(_: &NodeContext, input: &NodeInput) -> NodeOutcome {
 }
 #[must_use]
 pub fn register(mut builder: EngineBuilder, effects: &Arc<Effects>) -> EngineBuilder {
-    let functions: [Perform; 8] = [
-        plan, iterate, implement, fan_out, review, collect, fix, open_pr,
+    let handlers: [(&str, Perform); 8] = [
+        (graph::PLAN, plan),
+        (graph::ITERATE_PLAN, iterate),
+        (graph::IMPLEMENT, implement),
+        (graph::REVIEW_FANOUT, fan_out),
+        (graph::REVIEW, review),
+        (graph::COLLECT_FEEDBACK, collect),
+        (graph::FIX, fix),
+        (graph::OPEN_PR, open_pr),
     ];
-    for (id, perform) in graph::executable_nodes().into_iter().zip(functions) {
+    for (id, perform) in handlers {
         builder = builder.handler(
             id,
             Arc::new(Handler {

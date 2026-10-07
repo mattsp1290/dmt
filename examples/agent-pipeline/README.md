@@ -30,6 +30,8 @@ The reviewers are `reviewer-a`, `reviewer-b`, and `reviewer-c`. Findings sum to 
 - `signal --data DIR --run ID --name NAME --label LABEL`: resolves an open wait without background workers. `signoff` accepts `approved` / `changes_requested`; `ack` accepts `acknowledged`.
 - `show --data DIR --run ID`: prints graph, status, sorted tasks, open signals, and events.
 
+Plain `resume` discovers runs from the first 10,000 historical pipeline runs, then filters out terminal runs. In heavily reused directories, use `resume --run ID` to select a newer run explicitly.
+
 Global flags work before or after the subcommand: `--workers` defaults to 3 (at least 1), `--lease-secs` to 2 (at least 1), and `--timeout-secs` to 600. Heartbeats run every 500 ms. `claim_limit = 1` makes one worker strictly sequential. `demo` and `run` accept `--input JSON`, defaulting to `null`.
 
 ```sh
