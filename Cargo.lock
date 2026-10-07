@@ -242,6 +242,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dmt"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dmt-core",
+ "dmt-runtime",
+ "dmt-store",
+ "dmt-store-sqlite",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "dmt-core"
 version = "0.1.0"
 dependencies = [

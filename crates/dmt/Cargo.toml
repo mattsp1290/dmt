@@ -1,0 +1,31 @@
+[package]
+name = "dmt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Embeddable graph workflow engine with SQL-persisted, resumable runs"
+
+[features]
+default = []
+sqlite = ["dep:dmt-store-sqlite"]
+test-faults = ["dmt-runtime/test-faults", "dmt-store-sqlite?/test-faults"]
+
+[dependencies]
+dmt-core = { path = "../dmt-core" }
+dmt-store = { path = "../dmt-store" }
+dmt-runtime = { path = "../dmt-runtime" }
+dmt-store-sqlite = { path = "../dmt-store-sqlite", optional = true }
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+serde_json.workspace = true
+tempfile.workspace = true
+
+[[test]]
+name = "sqlite"
+path = "tests/sqlite.rs"
+required-features = ["sqlite"]
+
+[lints]
+workspace = true

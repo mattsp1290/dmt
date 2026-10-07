@@ -2,7 +2,9 @@
 
 ## Workspace
 
-This Cargo workspace uses Rust 2024. Run `cargo xtask check` before handing off changes. It runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`, followed by feature-off `cargo clippy --package <p> --all-targets -- -D warnings` and `cargo test --package <p>` for `dmt-store-sqlite` and `dmt-runtime`.
+This Cargo workspace uses Rust 2024. Run `cargo xtask check` before handing off changes. It runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`, followed by feature-off `cargo clippy --package <p> --all-targets -- -D warnings` and `cargo test --package <p>` for `dmt-store-sqlite`, `dmt-runtime`, and `dmt`.
+
+The example always enables `test-faults`, so workspace tests build fault code; only the per-package steps prove feature-off builds.
 
 `cargo xtask check --offline` passes `--offline` to all workspace and feature-off Clippy and test commands. `cargo fmt` has no such flag and never uses the network.
 
