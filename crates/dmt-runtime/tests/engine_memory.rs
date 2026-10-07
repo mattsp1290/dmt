@@ -1506,3 +1506,218 @@ async fn store_errors_do_not_stop_workers() {
     assert!(store.calls("claim_ready") > 5);
     h.abort().await;
 }
+fn repeat_wait_graph() -> Graph {
+    GraphBuilder::new("repeat-wait", 1)
+        .start("w")
+        .wait("w", "go", None)
+        .end("done", EndStatus::Completed)
+        .edge_on("w", "w", "repeat")
+        .edge_on("w", "done", "ok")
+        .build()
+        .unwrap()
+}
+#[tokio::test(start_paused = true)]
+async fn ambiguous_signal_does_not_consume_next_wait_occurrence() {
+    let store = CountingStore::new(Arc::new(MemoryStore::new()));
+    let h = start(
+        store.clone(),
+        Arc::new(ManualClock::new(T0)),
+        repeat_wait_graph(),
+        EngineConfig {
+            workers: 0,
+            ..fast_config()
+        },
+        &[],
+    )
+    .await;
+    let run = h
+        .start_run(&"repeat-wait".into(), Value::Null)
+        .await
+        .unwrap();
+    store.script("apply", vec![Fault::After]);
+    assert!(matches!(
+        h.signal(&run, "go", payload("repeat")).await,
+        Err(EngineError::Indeterminate { .. })
+    ));
+    assert_eq!(kind_count(&h, &run, "SignalReceived").await, 1);
+    assert_eq!(
+        store
+            .find_open_signal(&run, "go")
+            .await
+            .unwrap()
+            .unwrap()
+            .key
+            .as_str(),
+        "go/1"
+    );
+    h.signal(&run, "go", payload("ok")).await.unwrap();
+    completed(&h, &run).await;
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn concurrent_signals_do_not_consume_next_wait_occurrence() {
+    let store = CountingStore::new(Arc::new(MemoryStore::new()));
+    let h = start(
+        store.clone(),
+        Arc::new(ManualClock::new(T0)),
+        repeat_wait_graph(),
+        EngineConfig {
+            workers: 0,
+            ..fast_config()
+        },
+        &[],
+    )
+    .await;
+    let run = h
+        .start_run(&"repeat-wait".into(), Value::Null)
+        .await
+        .unwrap();
+    store.hold_next_load_runs(2);
+    let (a, b) = tokio::join!(
+        h.signal(&run, "go", payload("repeat")),
+        h.signal(&run, "go", payload("repeat"))
+    );
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert!(matches!(
+        a.as_ref().err().or(b.as_ref().err()),
+        Some(EngineError::SignalNotFound { .. })
+    ));
+    assert_eq!(kind_count(&h, &run, "SignalReceived").await, 1);
+    assert_eq!(
+        store
+            .find_open_signal(&run, "go")
+            .await
+            .unwrap()
+            .unwrap()
+            .key
+            .as_str(),
+        "go/1"
+    );
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn signal_retries_backend_error_without_committed_resolution() {
+    let store = CountingStore::new(Arc::new(MemoryStore::new()));
+    let h = start(
+        store.clone(),
+        Arc::new(ManualClock::new(T0)),
+        repeat_wait_graph(),
+        EngineConfig {
+            workers: 0,
+            ..fast_config()
+        },
+        &[],
+    )
+    .await;
+    let run = h
+        .start_run(&"repeat-wait".into(), Value::Null)
+        .await
+        .unwrap();
+    store.script(
+        "apply",
+        vec![Fault::Instead(StoreError::Backend("not committed".into()))],
+    );
+    h.signal(&run, "go", payload("repeat")).await.unwrap();
+    assert_eq!(kind_count(&h, &run, "SignalReceived").await, 1);
+    assert_eq!(
+        store
+            .find_open_signal(&run, "go")
+            .await
+            .unwrap()
+            .unwrap()
+            .key
+            .as_str(),
+        "go/1"
+    );
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn pending_heartbeat_does_not_delay_handler_timeout() {
+    let store = CountingStore::new(Arc::new(MemoryStore::new()));
+    store.script("heartbeat", vec![Fault::Delay(Duration::from_secs(3600))]);
+    let recorder = Recorder::default();
+    let r = recorder.clone();
+    let witness = Arc::new(());
+    let w = witness.clone();
+    let h = start(
+        store.clone(),
+        Arc::new(ManualClock::new(T0)),
+        fixtures::retry_chain(2),
+        EngineConfig {
+            heartbeat_every: Duration::from_millis(10),
+            handler_timeout: Some(Duration::from_millis(50)),
+            ..fast_config()
+        },
+        &[(
+            "a",
+            handler(move |ctx, _| {
+                let w = w.clone();
+                let r = r.clone();
+                async move {
+                    r.record(ctx);
+                    std::future::pending::<()>().await;
+                    drop(w);
+                    done()
+                }
+            }),
+        )],
+    )
+    .await;
+    let run = h.start_run(&"retry".into(), Value::Null).await.unwrap();
+    eventually("handler started", || async { recorder.count() == 1 }).await;
+    let begin = tokio::time::Instant::now();
+    eventually("timeout during heartbeat", || async {
+        kind_count(&h, &run, "TaskFailed").await == 1
+    })
+    .await;
+    assert!(begin.elapsed() < Duration::from_millis(100));
+    assert!(recorder.entries()[0].cancel.is_cancelled());
+    assert_eq!(Arc::strong_count(&witness), 2);
+    assert_eq!(store.calls("heartbeat"), 1);
+    h.abort().await;
+}
+#[tokio::test(start_paused = true)]
+async fn pending_heartbeat_does_not_delay_completion_or_drain() {
+    let store = CountingStore::new(Arc::new(MemoryStore::new()));
+    store.script("heartbeat", vec![Fault::Delay(Duration::from_secs(3600))]);
+    let recorder = Recorder::default();
+    let r = recorder.clone();
+    let gate = Gate::new();
+    let g = gate.clone();
+    let h = start(
+        store.clone(),
+        Arc::new(ManualClock::new(T0)),
+        fixtures::retry_chain(2),
+        EngineConfig {
+            heartbeat_every: Duration::from_millis(10),
+            ..fast_config()
+        },
+        &[(
+            "a",
+            handler(move |ctx, _| {
+                let g = g.clone();
+                let r = r.clone();
+                async move {
+                    r.record(ctx);
+                    g.wait().await;
+                    done()
+                }
+            }),
+        )],
+    )
+    .await;
+    let run = h.start_run(&"retry".into(), Value::Null).await.unwrap();
+    eventually("heartbeat started", || async {
+        store.calls("heartbeat") == 1
+    })
+    .await;
+    let drain = h.clone();
+    let shutdown = tokio::spawn(async move { drain.shutdown(Duration::from_millis(100)).await });
+    tokio::task::yield_now().await;
+    gate.open();
+    let begin = tokio::time::Instant::now();
+    shutdown.await.unwrap().unwrap();
+    assert!(begin.elapsed() < Duration::from_millis(100));
+    completed(&h, &run).await;
+    assert!(!recorder.entries()[0].cancel.is_cancelled());
+}

@@ -153,8 +153,8 @@ impl Operation<'_> {
         shared: &Shared,
         graph: &Graph,
         snapshot: &RunSnapshot,
+        selected_signal: &mut Option<dmt_core::SignalId>,
     ) -> Result<Commit, EngineError> {
-        let now = shared.clock.now();
         Ok(match self {
             Self::Signal { name, payload } => {
                 let signal = shared
@@ -165,11 +165,30 @@ impl Operation<'_> {
                         run_id: snapshot.run_id.clone(),
                         name: (*name).into(),
                     })?;
-                dmt_core::plan_signal(graph, snapshot, &signal.signal_id, (*payload).clone(), now)?
+                let selected = selected_signal.get_or_insert_with(|| signal.signal_id.clone());
+                if selected != &signal.signal_id {
+                    return Err(EngineError::SignalNotFound {
+                        run_id: snapshot.run_id.clone(),
+                        name: (*name).into(),
+                    });
+                }
+                dmt_core::plan_signal(
+                    graph,
+                    snapshot,
+                    selected,
+                    (*payload).clone(),
+                    shared.clock.now(),
+                )?
             }
-            Self::Cancel(reason) => dmt_core::plan_cancel(graph, snapshot, (*reason).into(), now)?,
-            Self::Timeout(signal) => dmt_core::plan_timeout(graph, snapshot, signal, now)?,
-            Self::Exhausted(task) => dmt_core::plan_exhausted(graph, snapshot, task, now)?,
+            Self::Cancel(reason) => {
+                dmt_core::plan_cancel(graph, snapshot, (*reason).into(), shared.clock.now())?
+            }
+            Self::Timeout(signal) => {
+                dmt_core::plan_timeout(graph, snapshot, signal, shared.clock.now())?
+            }
+            Self::Exhausted(task) => {
+                dmt_core::plan_exhausted(graph, snapshot, task, shared.clock.now())?
+            }
         })
     }
 }
@@ -189,6 +208,7 @@ async fn unowned_loop(
     ambiguous: &mut Option<StoreError>,
 ) -> Result<(), EngineError> {
     let mut last = StoreError::Busy;
+    let mut selected_signal = None;
     for retry in 0..=shared.config.max_replan_attempts {
         delay(shared, retry).await;
         let snapshot = match shared.store.load_run(run_id).await {
@@ -220,7 +240,10 @@ async fn unowned_loop(
             }
             Err(e) => return Err(e),
         };
-        let commit = match operation.plan(shared, &graph, &snapshot).await {
+        let commit = match operation
+            .plan(shared, &graph, &snapshot, &mut selected_signal)
+            .await
+        {
             Ok(c) => c,
             Err(EngineError::Store(e)) if transient(&e) => {
                 last = e;

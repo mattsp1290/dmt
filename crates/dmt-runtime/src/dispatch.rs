@@ -18,26 +18,43 @@ pub(crate) async fn run(
     let span = tracing::info_span!("dispatch", run_id = %claimed.task.run_id, node_id = %claimed.task.node_id, step_key = %claimed.task.step_key, attempt = claimed.task.attempt);
     async {
         let _guard = guard;
-        let mut heartbeat = interval_at(Instant::now() + shared.config.heartbeat_every, shared.config.heartbeat_every);
+        let mut heartbeat = interval_at(
+            Instant::now() + shared.config.heartbeat_every,
+            shared.config.heartbeat_every,
+        );
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let work = run_task(&shared, &claimed, &cancel);
         tokio::pin!(work);
-        let mut lease_lost = false;
-        loop {
-            tokio::select! {
-                () = &mut work => break,
-                _ = heartbeat.tick(), if !lease_lost => {
-                    match shared.store.heartbeat(&claimed.proof, shared.clock.now(), shared.config.lease_micros()).await {
-                        Ok(HeartbeatResult::Extended { .. }) => {},
-                        Ok(HeartbeatResult::Lost) | Err(StoreError::NotFound(_)) => {
-                            tracing::warn!("lease lost"); cancel.cancel(); lease_lost = true;
-                        }
-                        Err(error) => tracing::warn!(%error, "heartbeat failed"),
+        // Keep polling timeouts and outcomes while heartbeat I/O is pending.
+        let beats = async {
+            loop {
+                heartbeat.tick().await;
+                match shared
+                    .store
+                    .heartbeat(
+                        &claimed.proof,
+                        shared.clock.now(),
+                        shared.config.lease_micros(),
+                    )
+                    .await
+                {
+                    Ok(HeartbeatResult::Extended { .. }) => {}
+                    Ok(HeartbeatResult::Lost) | Err(StoreError::NotFound(_)) => {
+                        tracing::warn!("lease lost");
+                        cancel.cancel();
+                        return;
                     }
+                    Err(error) => tracing::warn!(%error, "heartbeat failed"),
                 }
             }
+        };
+        tokio::select! {
+            () = &mut work => {},
+            () = beats => work.await,
         }
-    }.instrument(span).await;
+    }
+    .instrument(span)
+    .await;
 }
 async fn run_task(shared: &Shared, claimed: &ClaimedTask, cancel: &CancellationToken) {
     let graph = match commit_loop::resolve(shared, &claimed.graph_id, claimed.graph_version).await {

@@ -135,6 +135,7 @@ pub fn task_id(run: &RunId, node: &str) -> TaskId {
 
 #[derive(Clone, Debug)]
 pub enum Fault {
+    Delay(Duration),
     Instead(StoreError),
     After,
     Lost,
@@ -196,6 +197,9 @@ impl CountingStore {
 impl Store for CountingStore {
     async fn register_graph(&self, graph: &Graph) -> Result<(), StoreError> {
         let fault = self.fault("register_graph");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {
@@ -209,6 +213,9 @@ impl Store for CountingStore {
     }
     async fn load_graph(&self, id: &GraphId, version: u32) -> Result<Option<Graph>, StoreError> {
         let fault = self.fault("load_graph");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {
@@ -222,6 +229,9 @@ impl Store for CountingStore {
     }
     async fn create_run(&self, commit: Commit) -> Result<RunId, StoreError> {
         let fault = self.fault("create_run");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {
@@ -235,6 +245,9 @@ impl Store for CountingStore {
     }
     async fn load_run(&self, run_id: &RunId) -> Result<Option<RunSnapshot>, StoreError> {
         let fault = self.fault("load_run");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {
@@ -262,6 +275,9 @@ impl Store for CountingStore {
     }
     async fn load_task(&self, task_id: &TaskId) -> Result<Option<TaskRecord>, StoreError> {
         let fault = self.fault("load_task");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {
@@ -276,6 +292,9 @@ impl Store for CountingStore {
     async fn claim_ready(&self, req: ClaimRequest) -> Result<Vec<ClaimedTask>, StoreError> {
         self.limits.lock().unwrap().push(req.limit);
         let fault = self.fault("claim_ready");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {
@@ -294,6 +313,9 @@ impl Store for CountingStore {
         lease_micros: i64,
     ) -> Result<HeartbeatResult, StoreError> {
         let fault = self.fault("heartbeat");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         if matches!(fault, Some(Fault::Lost)) {
             return Ok(HeartbeatResult::Lost);
         }
@@ -315,6 +337,9 @@ impl Store for CountingStore {
     ) -> Result<ApplyResult, StoreError> {
         let proof = by.clone();
         let fault = self.fault("apply");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {
@@ -337,6 +362,9 @@ impl Store for CountingStore {
         name: &str,
     ) -> Result<Option<SignalRecord>, StoreError> {
         let fault = self.fault("find_open_signal");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {
@@ -354,6 +382,9 @@ impl Store for CountingStore {
         limit: usize,
     ) -> Result<Vec<SignalRecord>, StoreError> {
         let fault = self.fault("due_signals");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {
@@ -367,6 +398,9 @@ impl Store for CountingStore {
     }
     async fn exhausted_tasks(&self, limit: usize) -> Result<Vec<TaskRecord>, StoreError> {
         let fault = self.fault("exhausted_tasks");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {
@@ -385,6 +419,9 @@ impl Store for CountingStore {
         limit: usize,
     ) -> Result<Vec<EventRecord>, StoreError> {
         let fault = self.fault("events");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {
@@ -398,6 +435,9 @@ impl Store for CountingStore {
     }
     async fn list_runs(&self, filter: RunFilter) -> Result<Vec<RunSummary>, StoreError> {
         let fault = self.fault("list_runs");
+        if let Some(Fault::Delay(duration)) = &fault {
+            tokio::time::sleep(*duration).await;
+        }
         let result = if let Some(Fault::Instead(ref error)) = fault {
             Err(error.clone())
         } else {

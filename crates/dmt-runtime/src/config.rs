@@ -11,7 +11,7 @@ pub struct EngineConfig {
     pub claim_limit: usize,
     /// Idle claim and quiescence polling interval.
     pub poll_interval: Duration,
-    /// Persistence lease duration.
+    /// Persistence lease duration, at least one microsecond.
     pub lease: Duration,
     /// Dispatch heartbeat cadence.
     pub heartbeat_every: Duration,
@@ -56,6 +56,9 @@ impl EngineConfig {
         i64::try_from(self.lease.as_micros()).unwrap_or(i64::MAX)
     }
     pub(crate) fn validate(&self) -> Result<(), BuildError> {
+        if self.lease_micros() == 0 {
+            return Err(BuildError::InvalidConfig("lease"));
+        }
         for (duration, name) in [
             (self.poll_interval, "poll_interval"),
             (self.lease, "lease"),
@@ -96,7 +99,7 @@ mod tests {
     }
     #[test]
     fn validate_rejects_zero_values() {
-        for field in 0..6 {
+        for field in 0..7 {
             let mut c = EngineConfig::default();
             match field {
                 0 => c.poll_interval = Duration::ZERO,
@@ -104,7 +107,8 @@ mod tests {
                 2 => c.heartbeat_every = Duration::ZERO,
                 3 => c.sweep_interval = Duration::ZERO,
                 4 => c.claim_limit = 0,
-                _ => c.max_replan_attempts = 0,
+                5 => c.max_replan_attempts = 0,
+                _ => c.lease = Duration::from_nanos(1),
             }
             assert!(matches!(c.validate(), Err(BuildError::InvalidConfig(_))));
         }
