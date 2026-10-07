@@ -1,0 +1,29 @@
+[package]
+name = "dmt-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Engine, workers, and handler contract for dmt"
+
+[features]
+test-faults = []
+
+[dependencies]
+dmt-core = { path = "../dmt-core" }
+dmt-store = { path = "../dmt-store" }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+async-trait.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+dmt-core = { path = "../dmt-core", features = ["fixtures"] }
+dmt-store-sqlite = { path = "../dmt-store-sqlite" }
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true
