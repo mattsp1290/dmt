@@ -35,8 +35,8 @@ fn check(offline: bool) {
     clippy.extend(["--", "-D", "warnings"]);
     run(workspace, &clippy);
     run(workspace, &test);
-    // test-faults gates public items; the facade must build these crates feature-off.
-    for package in ["dmt-store-sqlite", "dmt-runtime"] {
+    // The example always enables test-faults; only these -p checks prove feature-off builds.
+    for package in ["dmt-store-sqlite", "dmt-runtime", "dmt"] {
         let mut clippy = vec!["clippy", "--package", package, "--all-targets"];
         let mut test = vec!["test", "--package", package];
         if offline {
