@@ -4,6 +4,8 @@
 
 This Cargo workspace uses Rust 2024. Run `cargo xtask check` before handing off changes. It runs `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, and `cargo test --workspace --all-features`, followed by feature-off `cargo clippy --package <p> --all-targets -- -D warnings` and `cargo test --package <p>` for `dmt-store-sqlite`, `dmt-runtime`, and `dmt`.
 
+Feature-off steps cover every production crate declaring features: `dmt-store-sqlite`, `dmt-runtime` (`otel`), and `dmt` (`telemetry`). `dmt-store` and `dmt-telemetry` declare no features and need no separate feature-off step.
+
 The example always enables `test-faults`, so workspace tests build fault code; only the per-package steps prove feature-off builds.
 
 `cargo xtask check --offline` passes `--offline` to all workspace and feature-off Clippy and test commands. `cargo fmt` has no such flag and never uses the network.
@@ -23,3 +25,11 @@ Keep `.agents/plans/`, `.agents/reviews/`, and `reviews/` local. They are ignore
 ## Secrets and tests
 
 Never commit credentials. Use environment variable names in documentation, never credential values. Tests must run without credentials. SQLite tests need no environment variables.
+
+## Telemetry
+
+Tests must never require a Datadog Agent, external network, or credentials. Loopback mock receivers are permitted. Never pass `--telemetry` in tests except `telemetry_flag_is_offline_safe`. `dmt-telemetry` tests set `metrics: false` except `metrics_udp.rs`, which uses a test-owned UDP socket.
+
+Metric labels may contain only bounded `graph_id`, `node_id`, `backend`, `method`, `kind`, `result`, `outcome`, and `source` values. Never put run/task/step/signal/join/worker ids or payload-derived data in labels. Payloads, join results, graph JSON, and machine state are never logged. Error messages are truncated to 256 UTF-8 bytes; handler failure text is host-authored and logged.
+
+The OpenTelemetry chain is pinned: `datadog-opentelemetry` 0.5.2, `opentelemetry` 0.32.0, `opentelemetry_sdk` 0.32.1, and `tracing-opentelemetry` 0.33.0. Upgrade them together.

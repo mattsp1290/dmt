@@ -2,7 +2,7 @@
 
 ## What this crate owns
 
-`Store` is the object-safe, async persistence boundary used by every backend. This crate also owns `StoreError`, lease/claim/heartbeat/apply/event/run-query types, `Clock`, `SystemClock`, `ManualClock`, and the reference `MemoryStore`. Normal dependencies are only `dmt-core`, `async-trait`, `thiserror`, and `serde_json`; Tokio is a test dependency.
+`Store` is the object-safe, async persistence boundary used by every backend. This crate also owns `StoreError`, lease/claim/heartbeat/apply/event/run-query types, `Clock`, `SystemClock`, `ManualClock`, and the reference `MemoryStore`. Normal dependencies are only `dmt-core`, `async-trait`, `thiserror`, `serde_json`, `tracing`, and `metrics`; Tokio is a test dependency.
 
 ```sh
 cargo test -p dmt-store
@@ -107,3 +107,16 @@ One `std::sync::Mutex` protects all state; there is no await while holding its g
 ## What is not here
 
 SQL backends, runtime workers/handlers, bulk deletion, archival, graph migrations, typed payloads, and pagination cursors beyond `after_seq`/`limit` belong elsewhere.
+
+## Instrumentation
+
+`Store::backend_name()` is an informational bounded label: `memory`, `sqlite`, or `unknown` by default for foreign stores. `InstrumentedStore::new(Arc<dyn Store>)` forwards all 13 methods and preserves every result while recording a DEBUG `store` span (`operation.name=dmt.store`, resource=method, `backend`, `method`, `span.type=db`, `db.system`, `result`).
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `dmt.store.calls_total` | counter | backend, method, result |
+| `dmt.store.call.duration_seconds` | histogram in seconds | backend, method, result |
+
+Results are `ok` or a snake-case `StoreError` variant, never error text. `Ok(None)` and empty query results are `ok`. Descriptions are registered on construction and can be registered again after installing a recorder with `instrument::describe()`.
+
+The engine wraps stores automatically by default. If the host wraps one itself, set `EngineConfig.instrument_store = false` to avoid double counting. Direct host calls bypass engine wrapping unless the host uses the decorator. Idle claim/sweep queries still record metrics; the exporter aggregates series before sending. No payload or run/task identity becomes a label.

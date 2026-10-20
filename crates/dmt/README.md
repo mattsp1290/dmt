@@ -15,6 +15,7 @@ The default feature set is empty and includes no SQL driver or fault injection.
 
 | Feature | Effect |
 | --- | --- |
+| `telemetry` | Adds `dmt::telemetry`, `Telemetry`, `TelemetryConfig`, and runtime `otel` support |
 | `sqlite` | Adds `SqliteStore`, `SqliteOptions`, and `dmt::sqlite` |
 | `test-faults` | Test-only: forwards to `dmt-runtime` and, when `sqlite` is enabled, `dmt-store-sqlite`. Production builds must not enable it. |
 
@@ -139,4 +140,16 @@ See the [agent pipeline guide](../../examples/agent-pipeline/README.md) for its 
 
 ## What is not here
 
-PostgreSQL (`dmt-2mut`), observability (`dmt-5vpz`), graph migration/versioning (`dmt-wjuz`), typed payloads (`dmt-bi48`), timers (`dmt-bwww`), and Restate integration are deferred. The facade adds no authorization policy or real agent integrations.
+PostgreSQL (`dmt-2mut`), CLI inspection, middleware, and AG-UI projection (`dmt-5vpz`), graph migration/versioning (`dmt-wjuz`), typed payloads (`dmt-bi48`), timers (`dmt-bwww`), and Restate integration are deferred. The facade adds no authorization policy or real agent integrations.
+
+## Observability
+
+Enable the `telemetry` feature for [Datadog traces, metrics, and JSON logs](../dmt-telemetry/README.md). Initialize before the runtime, drain the engine, drop the runtime, then shut down telemetry:
+
+```rust,ignore
+let telemetry = dmt::telemetry::init(dmt::TelemetryConfig::from_env()?)?;
+// Run the host and drain the engine; then drop the Tokio runtime.
+telemetry.shutdown(std::time::Duration::from_secs(2))?;
+```
+
+Without the feature the facade includes only `tracing` and `metrics` instrumentation, with no installed subscriber, recorder, or Datadog dependencies.
