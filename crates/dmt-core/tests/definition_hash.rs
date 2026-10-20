@@ -59,3 +59,43 @@ fn pipeline_hash_is_pinned() {
         "532315045ec69a49a08fefd3682d3e18e405d9316b94eb4e979271527054763e"
     );
 }
+
+#[test]
+fn definition_hash_is_independent_of_json_object_key_order() {
+    // Keep these as raw JSON: routing them through Value would sort the keys in
+    // feature-off builds and make this test unable to exercise the input order.
+    let first = r#"{
+        "id": "key-order", "version": 1, "start": "work",
+        "nodes": {
+            "work": {"kind": {"kind": "task"}, "timeout_micros": null,
+                "retry": {"max_attempts": 3, "initial_backoff_micros": 1000000,
+                    "max_backoff_micros": 60000000, "multiplier_permille": 2000}},
+            "end": {"kind": {"kind": "end", "status": "completed"}}
+        },
+        "edges": [{"from": "work", "to": "end", "guard": "Default"}]
+    }"#;
+    let reordered = r#"{
+        "edges": [{"guard": "Default", "to": "end", "from": "work"}],
+        "nodes": {
+            "end": {"kind": {"status": "completed", "kind": "end"}},
+            "work": {"retry": {"multiplier_permille": 2000,
+                    "max_backoff_micros": 60000000, "initial_backoff_micros": 1000000,
+                    "max_attempts": 3},
+                "timeout_micros": null, "kind": {"kind": "task"}}
+        },
+        "start": "work", "version": 1, "id": "key-order"
+    }"#;
+    let expected = GraphBuilder::new("key-order", 1)
+        .start("work")
+        .task("work")
+        .end("end", EndStatus::Completed)
+        .edge("work", "end")
+        .build()
+        .unwrap();
+    let first = Graph::from_json(first).unwrap();
+    let reordered = Graph::from_json(reordered).unwrap();
+    assert_eq!(first, expected);
+    assert_eq!(reordered, expected);
+    assert_eq!(first.definition_hash(), reordered.definition_hash());
+    assert_eq!(first.definition_hash(), expected.definition_hash());
+}

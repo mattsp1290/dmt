@@ -252,6 +252,8 @@ Library instrumentation uses `tracing` and `metrics` without installing a subscr
 | `dmt.runtime.cancels_total` | counter | `result` (host result) | `handle.rs` `cancel` | Host cancel calls |
 | `dmt.runtime.sweeps_total` | counter | `kind` (`timeout`, `exhausted`), `result` (`applied`, `stale`, `contention`, `failed`) | `sweeps.rs` `classify` | Sweep actions |
 
+Hosts may call public `dmt_runtime::telemetry::run_scope(&span, &run_id)` immediately after span creation to join host-owned operations to the same run trace, without importing an OpenTelemetry bridge. Declare the `run_id` field on the host span itself. Call before entering, instrumenting, or materializing its context.
+
 The `otel` feature parents run-scoped spans on a deterministic run-id context; without it the hook is a no-op and normal dependencies include no OpenTelemetry crate. Handler futures run within child `handler` spans. Every error message is truncated at a UTF-8 boundary to 256 bytes. Payloads, join results, graph JSON, and machine state never appear in telemetry; handler-authored failure messages are logged.
 
 Metric labels contain only bounded graph/node ids, kinds, results, outcomes, and sources. Graph and node ids must come from graph definitions, never per-run data. No run/task/step/signal/join/worker ids or payload values become labels. Gauges are per process across engines. The store decorator records metrics for idle polls; disable automatic wrapping when supplying an `InstrumentedStore` to avoid double counting.

@@ -32,6 +32,15 @@ async fn run_scoped_spans_share_the_run_trace_id() {
     let run = h.start_run(&"linear".into(), Value::Null).await.unwrap();
     completed(&h, &run).await;
     h.abort().await;
+    // External hosts need only tracing and the public runtime helper, not an
+    // exporter-specific parenting API. These spans deliberately outlive dispatch.
+    for span in [
+        tracing::info_span!("projection", run_id = %run),
+        tracing::info_span!("child.signal_parent", run_id = %run),
+    ] {
+        telemetry::run_scope(&span, &run);
+        span.in_scope(|| tracing::info!("host operation"));
+    }
     provider.force_flush().unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     for (name, count) in [
@@ -39,6 +48,8 @@ async fn run_scoped_spans_share_the_run_trace_id() {
         ("dispatch", 2),
         ("handler", 2),
         ("commit", 2),
+        ("projection", 1),
+        ("child.signal_parent", 1),
     ] {
         let selected: Vec<_> = spans.iter().filter(|s| s.name == name).collect();
         assert_eq!(selected.len(), count, "{name}");
@@ -47,7 +58,10 @@ async fn run_scoped_spans_share_the_run_trace_id() {
                 span.span_context.trace_id().to_bytes(),
                 telemetry::run_trace_id(&run)
             );
-            if matches!(name, "start_run" | "dispatch") {
+            if matches!(
+                name,
+                "start_run" | "dispatch" | "projection" | "child.signal_parent"
+            ) {
                 assert_eq!(
                     span.parent_span_id.to_bytes(),
                     telemetry::run_root_span_id(&run)

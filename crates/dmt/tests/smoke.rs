@@ -5,6 +5,7 @@ async fn quick_start_completes_on_memory_store() {
 }
 #[test]
 fn module_paths_resolve() {
+    let _ = dmt::runtime::telemetry::run_scope;
     #[cfg(feature = "telemetry")]
     {
         let _: Option<dmt::telemetry::TelemetryConfig> = None;
