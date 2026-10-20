@@ -38,3 +38,5 @@ tracing-opentelemetry = { version = "=0.33.0", default-features = false }
 opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt", "env-filter", "json", "std"] }
+datadog-opentelemetry = { version = "=0.5.2", default-features = false }
+metrics-exporter-dogstatsd = "0.9"
