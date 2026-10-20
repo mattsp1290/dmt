@@ -1,7 +1,9 @@
+use crate::telemetry::{self, names};
 use crate::{EngineError, backoff::replan_delay, shared::Shared};
 use dmt_core::{Commit, Graph, Micros, NodeOutcome, PlanError, RunSnapshot, TaskId, plan_outcome};
 use dmt_store::{ClaimedTask, StoreError};
 use tokio::time::sleep;
+use tracing::Instrument;
 
 pub(crate) fn retryable(error: &StoreError) -> bool {
     matches!(
@@ -48,15 +50,38 @@ pub(crate) async fn outcome(
     graph: &Graph,
     claimed: &ClaimedTask,
     outcome: NodeOutcome,
-) {
+) -> &'static str {
+    let span = tracing::info_span!("commit", run_id = %claimed.task.run_id, kind = "outcome", "operation.name" = "dmt.commit", "resource.name" = "outcome", attempts = tracing::field::Empty, result = tracing::field::Empty);
+    async {
+        let start = std::time::Instant::now();
+        let result = outcome_loop(shared, graph, claimed, outcome).await;
+        tracing::Span::current().record("result", result);
+        metrics::histogram!(names::COMMIT_DURATION, "kind" => "outcome", "result" => result)
+            .record(start.elapsed().as_secs_f64());
+        result
+    }
+    .instrument(span)
+    .await
+}
+async fn outcome_loop(
+    shared: &Shared,
+    graph: &Graph,
+    claimed: &ClaimedTask,
+    outcome: NodeOutcome,
+) -> &'static str {
     for retry in 0..=shared.config.max_replan_attempts {
+        tracing::Span::current().record("attempts", retry.saturating_add(1));
         delay(shared, retry).await;
         let snapshot = match shared.store.load_run(&claimed.task.run_id).await {
             Ok(Some(s)) => s,
-            Err(e) if transient(&e) => continue,
+            Err(e) if transient(&e) => {
+                attempt("outcome", store_attempt(&e));
+                continue;
+            }
             other => {
                 tracing::error!(result = ?other.as_ref().map(Option::is_some), "run unavailable");
-                return;
+                attempt("outcome", "rejected");
+                return "rejected";
             }
         };
         let commit = match plan_with_downgrade(
@@ -73,11 +98,13 @@ pub(crate) async fn outcome(
                 | PlanError::TaskNotRunning { .. },
             ) => {
                 tracing::debug!("stale outcome dropped");
-                return;
+                attempt("outcome", "dropped");
+                return "dropped";
             }
             Err(error) => {
-                tracing::error!(%error, "outcome cannot be planned");
-                return;
+                tracing::error!(error = %telemetry::truncate_message(&error.to_string()), "outcome cannot be planned");
+                attempt("outcome", "plan_error");
+                return "rejected";
             }
         };
         #[cfg(feature = "test-faults")]
@@ -86,31 +113,42 @@ pub(crate) async fn outcome(
             &claimed.task.node_id,
             claimed.proof.attempt,
         );
+        let kinds = telemetry::event_kinds(&commit);
         match shared
             .store
             .apply(commit, Some(claimed.proof.clone()))
             .await
         {
             Ok(_) => {
+                telemetry::count_events(&kinds);
+                attempt("outcome", "applied");
                 shared.wake.notify_waiters();
-                return;
+                return "applied";
             }
-            Err(e) if retryable(&e) => tracing::debug!(error = %e, retry, "commit conflict"),
+            Err(e) if retryable(&e) => {
+                attempt("outcome", store_attempt(&e));
+                tracing::debug!(error = %telemetry::truncate_message(&e.to_string()), retry, "commit conflict");
+            }
             Err(StoreError::LeaseLost { .. }) => {
                 tracing::warn!("lease lost");
-                return;
+                metrics::counter!(names::LEASE_LOST, "graph_id" => claimed.graph_id.to_string(), "node_id" => claimed.task.node_id.to_string(), "source" => "commit").increment(1);
+                attempt("outcome", "lease_lost");
+                return "lease_lost";
             }
             Err(StoreError::RunTerminal { .. }) => {
                 tracing::debug!("run terminal");
-                return;
+                attempt("outcome", "terminal");
+                return "terminal";
             }
             Err(error) => {
-                tracing::error!(%error, "commit rejected");
-                return;
+                tracing::error!(error = %telemetry::truncate_message(&error.to_string()), "commit rejected");
+                attempt("outcome", "rejected");
+                return "rejected";
             }
         }
     }
     tracing::error!("replan attempts exhausted");
+    "exhausted"
 }
 fn plan_with_downgrade(
     graph: &Graph,
@@ -148,6 +186,14 @@ pub(crate) enum Operation<'a> {
     Exhausted(&'a TaskId),
 }
 impl Operation<'_> {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Signal { .. } => "signal",
+            Self::Cancel(_) => "cancel",
+            Self::Timeout(_) => "timeout",
+            Self::Exhausted(_) => "exhausted",
+        }
+    }
     async fn plan(
         &self,
         shared: &Shared,
@@ -198,7 +244,29 @@ pub(crate) async fn unowned(
     operation: Operation<'_>,
 ) -> Unowned {
     let mut ambiguous = None;
-    let result = unowned_loop(shared, run_id, &operation, &mut ambiguous).await;
+    let kind = operation.kind();
+    let span = tracing::info_span!("commit", %run_id, kind, "operation.name" = "dmt.commit", "resource.name" = kind, attempts = tracing::field::Empty, result = tracing::field::Empty);
+    let result = async {
+        let start = std::time::Instant::now();
+        let result = unowned_loop(shared, run_id, &operation, &mut ambiguous).await;
+        let label = match &result {
+            Ok(()) => "applied",
+            Err(EngineError::RunNotFound { .. }) => "run_not_found",
+            Err(
+                EngineError::RunTerminal { .. }
+                | EngineError::Store(StoreError::RunTerminal { .. })
+                | EngineError::Plan(PlanError::RunTerminal { .. }),
+            ) => "terminal",
+            Err(EngineError::Contention { .. }) => "exhausted",
+            Err(_) => "error",
+        };
+        tracing::Span::current().record("result", label);
+        metrics::histogram!(names::COMMIT_DURATION, "kind" => kind, "result" => label)
+            .record(start.elapsed().as_secs_f64());
+        result
+    }
+    .instrument(span)
+    .await;
     Unowned { result, ambiguous }
 }
 async fn unowned_loop(
@@ -207,22 +275,29 @@ async fn unowned_loop(
     operation: &Operation<'_>,
     ambiguous: &mut Option<StoreError>,
 ) -> Result<(), EngineError> {
+    let kind = operation.kind();
     let mut last = StoreError::Busy;
     let mut selected_signal = None;
     for retry in 0..=shared.config.max_replan_attempts {
+        tracing::Span::current().record("attempts", retry.saturating_add(1));
         delay(shared, retry).await;
         let snapshot = match shared.store.load_run(run_id).await {
             Ok(Some(s)) => s,
             Ok(None) => {
+                attempt(kind, "dropped");
                 return Err(EngineError::RunNotFound {
                     run_id: run_id.clone(),
                 });
             }
             Err(e) if transient(&e) => {
+                attempt(kind, store_attempt(&e));
                 last = e;
                 continue;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                attempt(kind, store_attempt(&e));
+                return Err(e.into());
+            }
         };
         let graph = match shared
             .catalog
@@ -235,10 +310,14 @@ async fn unowned_loop(
         {
             Ok(g) => g,
             Err(EngineError::Store(e)) if transient(&e) => {
+                attempt(kind, store_attempt(&e));
                 last = e;
                 continue;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                attempt(kind, "plan_error");
+                return Err(e);
+            }
         };
         let commit = match operation
             .plan(shared, &graph, &snapshot, &mut selected_signal)
@@ -246,13 +325,20 @@ async fn unowned_loop(
         {
             Ok(c) => c,
             Err(EngineError::Store(e)) if transient(&e) => {
+                attempt(kind, store_attempt(&e));
                 last = e;
                 continue;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                attempt(kind, "plan_error");
+                return Err(e);
+            }
         };
+        let kinds = telemetry::event_kinds(&commit);
         match shared.store.apply(commit, None).await {
             Ok(_) => {
+                telemetry::count_events(&kinds);
+                attempt(kind, "applied");
                 shared.wake.notify_waiters();
                 return Ok(());
             }
@@ -260,13 +346,31 @@ async fn unowned_loop(
                 if matches!(e, StoreError::Backend(_)) {
                     *ambiguous = Some(e.clone());
                 }
+                attempt(kind, store_attempt(&e));
                 last = e;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                attempt(kind, store_attempt(&e));
+                return Err(e.into());
+            }
         }
     }
     Err(EngineError::Contention {
         attempts: shared.config.max_replan_attempts.saturating_add(1),
         last,
     })
+}
+
+fn attempt(kind: &'static str, result: &'static str) {
+    metrics::counter!(names::COMMIT_ATTEMPTS, "kind" => kind, "result" => result).increment(1);
+}
+fn store_attempt(error: &StoreError) -> &'static str {
+    match error {
+        StoreError::VersionConflict { .. } | StoreError::JoinDrift { .. } => "conflict",
+        StoreError::Busy => "busy",
+        StoreError::Backend(_) => "backend",
+        StoreError::LeaseLost { .. } => "lease_lost",
+        StoreError::RunTerminal { .. } => "terminal",
+        _ => "rejected",
+    }
 }

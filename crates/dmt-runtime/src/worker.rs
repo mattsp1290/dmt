@@ -26,13 +26,14 @@ pub(crate) async fn run(shared: Arc<Shared>) {
             match shared.store.claim_ready(request).await {
                 Ok(tasks) => tasks,
                 Err(error) => {
-                    tracing::warn!(%error, "claim_ready failed");
+                    tracing::warn!(error = %crate::telemetry::truncate_message(&error.to_string()), "claim_ready failed");
                     vec![]
                 }
             }
         };
         let progressed = !tasks.is_empty();
         for claimed in tasks {
+            metrics::counter!(crate::telemetry::names::TASKS_CLAIMED, "graph_id" => claimed.graph_id.to_string()).increment(1);
             let permit = slots
                 .clone()
                 .try_acquire_owned()

@@ -23,6 +23,7 @@ impl Engine {
     pub async fn start(self) -> Result<crate::EngineHandle, crate::EngineError> {
         use crate::{CancellationToken, commit_loop, handle::HandleInner, shared::Shared};
         use dmt_store::StoreError;
+        crate::telemetry::describe();
         for graph in self.catalog.graphs() {
             let mut last = StoreError::Busy;
             let mut registered = false;

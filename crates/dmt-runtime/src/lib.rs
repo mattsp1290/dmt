@@ -43,3 +43,6 @@ mod faults;
 #[cfg(feature = "test-faults")]
 #[doc(hidden)]
 pub use faults::FaultPoint;
+
+/// Vendor-neutral runtime telemetry and optional run trace contexts.
+pub mod telemetry;

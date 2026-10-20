@@ -36,6 +36,7 @@ impl Shared {
             .spawn(self.kill.clone().run_until_cancelled_owned(future))
     }
     pub fn register(self: &Arc<Self>, claimed: &ClaimedTask) -> (CancellationToken, InFlightGuard) {
+        metrics::gauge!(crate::telemetry::names::IN_FLIGHT).increment(1.0);
         let cancel = self.handler_cancel.child_token();
         let key = (claimed.task.task_id.clone(), claimed.task.attempt);
         self.in_flight
@@ -68,6 +69,7 @@ impl Drop for InFlightGuard {
             .lock()
             .expect("in-flight lock poisoned")
             .remove(&self.key);
+        metrics::gauge!(crate::telemetry::names::IN_FLIGHT).decrement(1.0);
         self.shared.wake.notify_waiters();
     }
 }

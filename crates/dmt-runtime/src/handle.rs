@@ -1,9 +1,11 @@
+use crate::telemetry::{self, names};
 use crate::{EngineError, commit_loop, shared::Shared, shutdown};
 use dmt_core::{GraphId, RunId, RunSnapshot, RunStatus, WorkerId, plan_start};
 use dmt_store::{EventRecord, StoreError};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
+use tracing::Instrument;
 
 /// Engine control and store queries. Dropping the last clone stops every background task.
 /// Handlers must not own a handle clone or call `abort`/`shutdown`: those wait for handlers.
@@ -48,16 +50,27 @@ impl EngineHandle {
                     graph_id: graph_id.clone(),
                 })?;
         let run_id = RunId::new();
+        let span = tracing::info_span!("start_run", %run_id, %graph_id, graph_version = graph.version(), "operation.name" = "dmt.start_run", "resource.name" = %graph_id, result = tracing::field::Empty);
+        telemetry::run_scope(&span, &run_id);
+        async {
+        let result = async {
         let mut last = StoreError::Busy;
         for retry in 0..=shared.config.max_replan_attempts {
             commit_loop::delay(shared, retry).await;
             let commit = plan_start(graph, run_id.clone(), input.clone(), shared.clock.now())?;
+            let kinds = telemetry::event_kinds(&commit);
             match shared.store.create_run(commit).await {
                 Ok(_) => {
+                    telemetry::count_events(&kinds);
+                    metrics::counter!(names::RUNS_STARTED, "graph_id" => graph_id.to_string()).increment(1);
+                    tracing::info!(%run_id, %graph_id, "run started");
                     shared.wake.notify_waiters();
                     return Ok(run_id);
                 }
                 Err(StoreError::VersionConflict { .. }) if retry > 0 => {
+                    telemetry::count_events(&kinds);
+                    metrics::counter!(names::RUNS_STARTED, "graph_id" => graph_id.to_string()).increment(1);
+                    tracing::info!(%run_id, %graph_id, "run started");
                     shared.wake.notify_waiters();
                     return Ok(run_id);
                 }
@@ -69,7 +82,12 @@ impl EngineHandle {
             attempts: shared.config.max_replan_attempts.saturating_add(1),
             last,
         })
+        }.await;
+        tracing::Span::current().record("result", telemetry::host_result(&result));
+        result
+        }.instrument(span).await
     }
+
     /// Read a run snapshot.
     /// # Errors
     /// Returns a store error.
@@ -151,40 +169,56 @@ impl EngineHandle {
         name: &str,
         payload: dmt_core::SignalPayload,
     ) -> Result<(), EngineError> {
-        use dmt_core::PlanError;
-        let report = commit_loop::unowned(
-            &self.inner.shared,
-            run_id,
-            commit_loop::Operation::Signal {
-                name,
-                payload: &payload,
-            },
-        )
-        .await;
-        let result = match report.result {
-            Err(
-                EngineError::RunNotFound { .. }
-                | EngineError::SignalNotFound { .. }
-                | EngineError::Plan(
-                    PlanError::UnknownSignal { .. }
-                    | PlanError::SignalResolved { .. }
-                    | PlanError::TaskNotAwaiting { .. },
+        let span = tracing::info_span!("signal", %run_id, name, "operation.name" = "dmt.signal", "resource.name" = "signal", result = tracing::field::Empty);
+        telemetry::run_scope(&span, run_id);
+        async {
+            let result = async {
+                use dmt_core::PlanError;
+                let report = commit_loop::unowned(
+                    &self.inner.shared,
+                    run_id,
+                    commit_loop::Operation::Signal {
+                        name,
+                        payload: &payload,
+                    },
                 )
-                | EngineError::Store(StoreError::AlreadyResolved { .. }),
-            ) => Err(EngineError::SignalNotFound {
-                run_id: run_id.clone(),
-                name: name.into(),
-            }),
-            other => self.terminal_error(run_id, other).await,
-        };
-        if matches!(
-            result,
-            Err(EngineError::SignalNotFound { .. } | EngineError::RunTerminal { .. })
-        ) && let Some(last) = report.ambiguous
-        {
-            return Err(EngineError::Indeterminate { last });
+                .await;
+                let result = match report.result {
+                    Err(
+                        EngineError::RunNotFound { .. }
+                        | EngineError::SignalNotFound { .. }
+                        | EngineError::Plan(
+                            PlanError::UnknownSignal { .. }
+                            | PlanError::SignalResolved { .. }
+                            | PlanError::TaskNotAwaiting { .. },
+                        )
+                        | EngineError::Store(StoreError::AlreadyResolved { .. }),
+                    ) => Err(EngineError::SignalNotFound {
+                        run_id: run_id.clone(),
+                        name: name.into(),
+                    }),
+                    other => self.terminal_error(run_id, other).await,
+                };
+                if matches!(
+                    result,
+                    Err(EngineError::SignalNotFound { .. } | EngineError::RunTerminal { .. })
+                ) && let Some(last) = report.ambiguous
+                {
+                    return Err(EngineError::Indeterminate { last });
+                }
+                result
+            }
+            .await;
+            let label = telemetry::host_result(&result);
+            tracing::Span::current().record("result", label);
+            metrics::counter!(names::SIGNALS, "result" => label).increment(1);
+            if result.is_ok() {
+                tracing::info!(%run_id, name, "run signalled");
+            }
+            result
         }
-        result
+        .instrument(span)
+        .await
     }
     /// Cancel a run and notify its locally registered handler tokens.
     /// The host is responsible for authorizing the request.
@@ -197,40 +231,56 @@ impl EngineHandle {
         run_id: &RunId,
         reason: impl Into<String>,
     ) -> Result<(), EngineError> {
-        let reason = reason.into();
-        let report = commit_loop::unowned(
-            &self.inner.shared,
-            run_id,
-            commit_loop::Operation::Cancel(&reason),
-        )
-        .await;
-        let result = self.terminal_error(run_id, report.result).await;
-        if result.is_ok()
-            || (report.ambiguous.is_some()
-                && matches!(
-                    result,
-                    Err(EngineError::RunTerminal {
-                        status: RunStatus::Cancelled,
-                        ..
-                    })
-                ))
-        {
-            let tokens: Vec<_> = self
-                .inner
-                .shared
-                .in_flight
-                .lock()
-                .expect("in-flight lock poisoned")
-                .values()
-                .filter(|f| &f.run_id == run_id)
-                .map(|f| f.cancel.clone())
-                .collect();
-            for token in tokens {
-                token.cancel();
+        let span = tracing::info_span!("cancel", %run_id, "operation.name" = "dmt.cancel", "resource.name" = "cancel", result = tracing::field::Empty);
+        telemetry::run_scope(&span, run_id);
+        async {
+            let result = async {
+                let reason = reason.into();
+                let report = commit_loop::unowned(
+                    &self.inner.shared,
+                    run_id,
+                    commit_loop::Operation::Cancel(&reason),
+                )
+                .await;
+                let result = self.terminal_error(run_id, report.result).await;
+                if result.is_ok()
+                    || (report.ambiguous.is_some()
+                        && matches!(
+                            result,
+                            Err(EngineError::RunTerminal {
+                                status: RunStatus::Cancelled,
+                                ..
+                            })
+                        ))
+                {
+                    let tokens: Vec<_> = self
+                        .inner
+                        .shared
+                        .in_flight
+                        .lock()
+                        .expect("in-flight lock poisoned")
+                        .values()
+                        .filter(|f| &f.run_id == run_id)
+                        .map(|f| f.cancel.clone())
+                        .collect();
+                    for token in tokens {
+                        token.cancel();
+                    }
+                    return Ok(());
+                }
+                result
             }
-            return Ok(());
+            .await;
+            let label = telemetry::host_result(&result);
+            tracing::Span::current().record("result", label);
+            metrics::counter!(names::CANCELS, "result" => label).increment(1);
+            if result.is_ok() {
+                tracing::info!(%run_id, "run cancelled");
+            }
+            result
         }
-        result
+        .instrument(span)
+        .await
     }
     async fn terminal_error(
         &self,
