@@ -7,6 +7,7 @@ description = "Engine, workers, and handler contract for dmt"
 
 [features]
 test-faults = []
+otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:uuid", "dep:sha2"]
 
 [dependencies]
 dmt-core = { path = "../dmt-core" }
@@ -19,7 +20,17 @@ serde_json.workspace = true
 thiserror.workspace = true
 rand.workspace = true
 
+metrics.workspace = true
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+
 [dev-dependencies]
+tracing-core = "0.1"
+metrics-util.workspace = true
+tracing-subscriber.workspace = true
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 dmt-core = { path = "../dmt-core", features = ["fixtures"] }
 dmt-store-sqlite = { path = "../dmt-store-sqlite" }
 tokio = { workspace = true, features = ["test-util", "rt-multi-thread", "macros"] }
@@ -27,3 +38,7 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "otel_parent"
+required-features = ["otel"]

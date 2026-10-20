@@ -61,6 +61,10 @@ fn clear_lease(task: &mut TaskRecord) {
 
 #[async_trait]
 impl Store for MemoryStore {
+    fn backend_name(&self) -> &'static str {
+        "memory"
+    }
+
     async fn register_graph(&self, graph: &Graph) -> Result<(), StoreError> {
         let mut inner = self.lock();
         let key = (graph.id().clone(), graph.version());

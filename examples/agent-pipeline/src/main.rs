@@ -25,11 +25,20 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let telemetry = match init_telemetry(&cli) {
+        Ok(telemetry) => telemetry,
+        Err(code) => return ExitCode::from(code),
+    };
     let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(AppError::Io)
         .and_then(|rt| rt.block_on(execute(&cli)));
+    if let Some(telemetry) = telemetry
+        && let Err(error) = telemetry.shutdown(Duration::from_secs(2))
+    {
+        tracing::warn!(%error, "telemetry shutdown failed");
+    }
     match result {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
@@ -52,6 +61,23 @@ fn main() -> ExitCode {
         }
     }
 }
+fn init_telemetry(cli: &Cli) -> Result<Option<dmt::Telemetry>, u8> {
+    if !cli.telemetry {
+        return Ok(None);
+    }
+    let mut config = dmt::TelemetryConfig::from_env().map_err(|error| {
+        eprintln!("error: telemetry: {error}");
+        2
+    })?;
+    if std::env::var_os("DD_SERVICE").is_none() {
+        config.service = "agent-pipeline".into();
+    }
+    dmt::telemetry::init(config).map(Some).map_err(|error| {
+        eprintln!("error: telemetry: {error}");
+        1
+    })
+}
+
 fn report_error(error: &dyn std::fmt::Display) {
     let diagnostic = error.to_string();
     let line = diagnostic.lines().next().unwrap_or("unknown error");

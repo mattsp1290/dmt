@@ -59,3 +59,16 @@ async fn reader_pool_is_read_only() {
         .unwrap();
     assert_eq!(count, 0);
 }
+
+#[tokio::test]
+async fn backend_name_is_sqlite() {
+    use dmt_store::Store;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("backend.db");
+    crate::SqliteStore::migrate(&path).await.unwrap();
+    let store = crate::SqliteStore::open(&path, crate::SqliteOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(store.backend_name(), "sqlite");
+    store.close().await;
+}

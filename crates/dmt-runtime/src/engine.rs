@@ -23,6 +23,7 @@ impl Engine {
     pub async fn start(self) -> Result<crate::EngineHandle, crate::EngineError> {
         use crate::{CancellationToken, commit_loop, handle::HandleInner, shared::Shared};
         use dmt_store::StoreError;
+        crate::telemetry::describe();
         for graph in self.catalog.graphs() {
             let mut last = StoreError::Busy;
             let mut registered = false;
@@ -136,6 +137,11 @@ impl EngineBuilder {
             }
         }
         self.config.validate()?;
+        let store: Arc<dyn Store> = if self.config.instrument_store {
+            Arc::new(dmt_store::InstrumentedStore::new(store))
+        } else {
+            store
+        };
         if self.config.workers > 0 {
             for graph in graphs.values() {
                 handlers.require_all(graph)?;

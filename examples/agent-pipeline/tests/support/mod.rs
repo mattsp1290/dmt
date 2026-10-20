@@ -40,8 +40,20 @@ impl Cli {
         }
     }
     pub fn spawn(&self, name: &str, args: &[&str], env: &[(&str, &str)]) -> Held {
+        self.spawn_inner(name, args, env, false)
+    }
+    fn spawn_inner(&self, name: &str, args: &[&str], env: &[(&str, &str)], clean: bool) -> Held {
         let stderr_path = self.data.join(format!("{name}.stderr"));
-        let mut child = Command::new(env!("CARGO_BIN_EXE_agent-pipeline"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agent-pipeline"));
+        if clean {
+            for (key, _) in std::env::vars_os() {
+                let text = key.to_string_lossy();
+                if text.starts_with("DD_") || text.starts_with("DMT_TELEMETRY_") {
+                    command.env_remove(key);
+                }
+            }
+        }
+        let mut child = command
             .args(["--data"])
             .arg(&self.data)
             .args(["--workers", "1", "--lease-secs", "2"])
@@ -71,6 +83,9 @@ impl Cli {
             stderr_path,
             deadline: Instant::now() + Duration::from_secs(30),
         }
+    }
+    pub fn step_clean(&self, name: &str, args: &[&str], env: &[(&str, &str)]) -> Outcome {
+        self.spawn_inner(name, args, env, true).finish()
     }
     pub fn step(&self, name: &str, args: &[&str], env: &[(&str, &str)]) -> Outcome {
         self.spawn(name, args, env).finish()

@@ -31,3 +31,12 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 tracing = "0.1"
 tempfile = "3"
 proptest = "1"
+metrics = "0.24"
+metrics-util = { version = "0.20", default-features = false, features = ["debugging"] }
+# OpenTelemetry 0.32 / SDK 0.32.1 / Datadog 0.5.2: bump the chain together.
+tracing-opentelemetry = { version = "=0.33.0", default-features = false }
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["trace"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "fmt", "env-filter", "json", "std"] }
+datadog-opentelemetry = { version = "=0.5.2", default-features = false }
+metrics-exporter-dogstatsd = "0.9"

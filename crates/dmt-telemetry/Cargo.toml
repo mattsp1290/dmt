@@ -1,0 +1,33 @@
+[package]
+name = "dmt-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Datadog traces, metrics, and JSON logs for dmt hosts"
+
+[dependencies]
+dmt-runtime = { path = "../dmt-runtime", features = ["otel"] }
+dmt-store = { path = "../dmt-store" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-opentelemetry.workspace = true
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+datadog-opentelemetry.workspace = true
+metrics.workspace = true
+metrics-exporter-dogstatsd.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+time.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+dmt-core = { path = "../dmt-core", features = ["fixtures"] }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
+metrics-util.workspace = true
+rmpv = "1.3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }
+tempfile.workspace = true
+async-trait.workspace = true
+
+[lints]
+workspace = true

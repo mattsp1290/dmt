@@ -181,3 +181,61 @@ fn parser_errors_are_single_line_and_help_succeeds() {
     assert!(help.stdout.contains("Usage:"));
     assert_eq!(help.stderr(), "");
 }
+
+#[test]
+fn telemetry_flag_is_offline_safe() {
+    use std::{
+        net::UdpSocket,
+        time::{Duration, Instant},
+    };
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let port = socket.local_addr().unwrap().port().to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let cli = Cli::new(dir.path());
+    let output = cli.step_clean(
+        "telemetry",
+        &["demo", "--telemetry", "--workers", "3"],
+        &[
+            ("DD_AGENT_HOST", "127.0.0.1"),
+            ("DD_DOGSTATSD_PORT", &port),
+            ("DD_TRACE_AGENT_URL", "http://127.0.0.1:1"),
+            ("DMT_TELEMETRY_METRICS_FLUSH_MS", "200"),
+            ("DD_ENV", "test"),
+        ],
+    );
+    output.success();
+    assert!(output.stdout.starts_with("run "));
+    assert_eq!(output.stdout.lines().last(), Some("RunCompleted"));
+    let run = run_id(&output.stdout);
+    let stderr = output.stderr();
+    assert_ne!(stderr.trim(), "");
+    let logs: Vec<serde_json::Value> = stderr
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            assert!(!line.starts_with('\u{1b}'));
+            serde_json::from_str(line).unwrap()
+        })
+        .collect();
+    assert!(logs.iter().any(|line| line["message"] == "run started"
+        && line["dmt"]["run_id"] == run
+        && line["service"] == "agent-pipeline"
+        && line["env"] == "test"));
+    let mut bytes = vec![0; 65536];
+    let start = Instant::now();
+    loop {
+        let count = socket
+            .recv(&mut bytes)
+            .expect("RunCompleted metric delivered before exit");
+        let packet = std::str::from_utf8(&bytes[..count]).unwrap();
+        if packet.lines().any(|line| {
+            line.contains("dmt.runtime.events_total") && line.contains("kind:RunCompleted")
+        }) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+}

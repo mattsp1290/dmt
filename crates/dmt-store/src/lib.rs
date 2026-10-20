@@ -66,3 +66,7 @@ mod tests {
         }
     }
 }
+
+/// Store decorator and telemetry contract.
+pub mod instrument;
+pub use instrument::InstrumentedStore;

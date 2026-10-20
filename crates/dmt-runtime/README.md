@@ -6,7 +6,7 @@ A backend-neutral Tokio engine driving planner commits through `Arc<dyn Store>`.
 The public API includes `Engine`, `EngineBuilder`, `EngineHandle`, `EngineConfig`,
 `NodeHandler`, `NodeContext`, `NodeInput`, `HandlerError`, `HandlerRegistry`,
 `Quiescent`, `BuildError`, `EngineError`, and the re-exported `CancellationToken`.
-Normal dependencies are dmt-core, dmt-store, Tokio, tokio-util, tracing,
+Normal dependencies are dmt-core, dmt-store, Tokio, tokio-util, tracing, metrics,
 async-trait, serde_json, thiserror, and rand. No SQL driver is a normal dependency.
 
 ```sh
@@ -89,6 +89,7 @@ and prevents last-handle drop from stopping the engine. A handler **must not cal
 
 | Field | Default | Meaning |
 | --- | --- | --- |
+| instrument_store | true | Wrap store calls; set false when already wrapped by the host |
 | workers | 4 | Claim loops; 0 disables all background tasks |
 | claim_limit | 8 | In-flight dispatches per worker |
 | poll_interval | 250 ms | Idle claim and quiescence polling |
@@ -220,19 +221,40 @@ builder without graphs serves `signal`, `cancel`, `run`, `events`, and
 on the builder and otherwise returns `GraphNotRegistered`. After shutdown or
 abort, the handle still serves these host/store operations without workers.
 
-## Tracing
+## Telemetry
 
-| Kind | Name / message | Level | Fields |
-| --- | --- | --- | --- |
-| Span | dispatch | info | run_id, node_id, step_key, attempt |
-| Event | commit conflict | debug | error, retry |
-| Event | lease lost | warn | dispatch span context |
-| Event | stale outcome dropped / run terminal | debug | dispatch span context |
-| Event | replan attempts exhausted | error | dispatch span context |
-| Event | handler panicked | error | dispatch span context |
-| Event | claim_ready failed | warn | error |
+Library instrumentation uses `tracing` and `metrics` without installing a subscriber or recorder. Enable the facade's `telemetry` feature and use [dmt-telemetry](../dmt-telemetry/README.md) for Datadog transport and correlated JSON logs.
 
-Handler futures inherit the dispatch span. Payloads are never logged.
+| Span | Level | Created in | `operation.name` | `resource.name` | Fields at creation | Fields recorded later | Run-scoped |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `start_run` | INFO | `crates/dmt-runtime/src/handle.rs` `EngineHandle::start_run` | `dmt.start_run` | graph id | `run_id`, `graph_id`, `graph_version` | `result` (`ok`, `contention`, `error`) | yes |
+| `dispatch` | INFO | `crates/dmt-runtime/src/dispatch.rs` `run` (exists; gains fields) | `dmt.dispatch` | `{graph_id}/{node_id}` | `run_id`, `graph_id`, `graph_version`, `node_id`, `task_id`, `step_key`, `attempt` | `outcome` (handler class, below), `result` (dispatch result, below), `otel.status_code` = `ERROR` when `result` is not `applied` or `dropped` | yes |
+| `handler` | INFO | `dispatch.rs` `run_task`, around the spawned handler future (replaces instrumenting it with the dispatch span; the handler span is a child of `dispatch`) | `dmt.handler` | node id | `run_id`, `graph_id`, `node_id`, `attempt` | `outcome` (handler class), `otel.status_code` = `ERROR` for `fail_*`, `panic`, `timeout`; `error.message` (truncated) for those | no (child) |
+| `commit` | INFO | `crates/dmt-runtime/src/commit_loop.rs` `outcome` and `unowned_loop` | `dmt.commit` | commit kind | `run_id`, `kind` (`outcome`, `signal`, `cancel`, `timeout`, `exhausted`) | `attempts` (u32, tries used), `result` (commit result, below) | no (child) |
+| `signal` | INFO | `handle.rs` `EngineHandle::signal` | `dmt.signal` | `signal` (fixed; the host-authored name is the `name` field, not the resource) | `run_id`, `name` | `result` (host result, below) | yes |
+| `cancel` | INFO | `handle.rs` `EngineHandle::cancel` | `dmt.cancel` | `cancel` | `run_id` | `result` (host result) | yes |
+| `sweep` | INFO | `crates/dmt-runtime/src/sweeps.rs`, one per due signal or exhausted task processed (none on idle ticks) | `dmt.sweep` | `timeout` or `exhausted` | `run_id`, `kind` | `result` (`applied`, `stale`, `contention`, `failed`) | yes |
+| `store` | DEBUG | `crates/dmt-store/src/instrument.rs` `InstrumentedStore`, one per `Store` method call | `dmt.store` | method name | `backend`, `method`, `span.type` = `db`, `db.system` = backend | `result` (store result, below) | no (child or root) |
+
+| Metric | Type | Labels | Recorded in | Meaning |
+| --- | --- | --- | --- | --- |
+| `dmt.runtime.runs_started_total` | counter | `graph_id` | `handle.rs` `start_run` after `create_run` succeeds (including the ambiguous-retry success path) | Runs created by this engine |
+| `dmt.runtime.tasks_claimed_total` | counter | `graph_id` | `worker.rs` per `ClaimedTask` | Claims including lease reclaims |
+| `dmt.runtime.in_flight` | gauge | none | `shared.rs` `register` (+1) and `InFlightGuard::drop` (-1), via `Gauge::increment`/`decrement` | Dispatches currently running in this process |
+| `dmt.runtime.dispatch.duration_seconds` | histogram | `graph_id`, `node_id`, `result` | `dispatch.rs` at the end of `run` | Claim-to-commit wall time |
+| `dmt.runtime.dispatch.outcomes_total` | counter | `graph_id`, `node_id`, `outcome` | `dispatch.rs` when the handler class is known | Handler outcome classes |
+| `dmt.runtime.handler.duration_seconds` | histogram | `graph_id`, `node_id`, `outcome` | `dispatch.rs` around the handler future | Handler wall time including timeout |
+| `dmt.runtime.lease_lost_total` | counter | `graph_id`, `node_id`, `source` (`heartbeat`, `commit`) | `dispatch.rs` heartbeat `Lost`/`NotFound` (`source = heartbeat`) and `commit_loop.rs` `LeaseLost` (`source = commit`) | Lease-loss observations; one lost lease can produce one of each source, so dashboards sum by `source` or pick one |
+| `dmt.runtime.commit.attempts_total` | counter | `kind`, `result` (attempt result) | `commit_loop.rs` once per try in both loops | Commit tries and how each ended |
+| `dmt.runtime.commit.duration_seconds` | histogram | `kind`, `result` (commit result) | `commit_loop.rs` at loop exit | Whole commit loop time |
+| `dmt.runtime.events_total` | counter | `kind` (`RunEvent::kind()`) | `commit_loop.rs` both loops and `handle.rs` `start_run`, once per event of a commit that the store accepted | Journal growth by event kind; excludes `TaskClaimed` and reclaim `TaskExhausted` events the store writes inside `claim_ready` |
+| `dmt.runtime.signals_total` | counter | `result` (host result) | `handle.rs` `signal` | Host signal calls |
+| `dmt.runtime.cancels_total` | counter | `result` (host result) | `handle.rs` `cancel` | Host cancel calls |
+| `dmt.runtime.sweeps_total` | counter | `kind` (`timeout`, `exhausted`), `result` (`applied`, `stale`, `contention`, `failed`) | `sweeps.rs` `classify` | Sweep actions |
+
+The `otel` feature parents run-scoped spans on a deterministic run-id context; without it the hook is a no-op and normal dependencies include no OpenTelemetry crate. Handler futures run within child `handler` spans. Every error message is truncated at a UTF-8 boundary to 256 bytes. Payloads, join results, graph JSON, and machine state never appear in telemetry; handler-authored failure messages are logged.
+
+Metric labels contain only bounded graph/node ids, kinds, results, outcomes, and sources. Graph and node ids must come from graph definitions, never per-run data. No run/task/step/signal/join/worker ids or payload values become labels. Gauges are per process across engines. The store decorator records metrics for idle polls; disable automatic wrapping when supplying an `InstrumentedStore` to avoid double counting.
 
 ## Security notes
 
@@ -252,7 +274,9 @@ signal, cancel, and sweep commits have no fault hook.
 | --- | --- |
 | engine_memory | Execution order, joins, retries, leases, contention, sliding window, handlers, signals, sweeps, stops, wake-driven progress, backend ambiguity |
 | engine_sqlite | Fan-out, abort/drop lease recovery, parked restart, child-process abort before apply |
-| tracing | Dispatch identity fields and commit conflict events |
+| tracing | Every operation span, handler outcomes, errors, payload exclusion, store wrapper opt-out |
+| metrics | Runtime counters, histograms, gauge, retries, contention, signals, cancels, lease loss, sweeps |
+| otel_parent (otel feature) | Run-derived trace ids and handler parentage |
 
 The workspace gate checks all-feature and feature-off Clippy and tests.
 
@@ -261,4 +285,4 @@ The workspace gate checks all-feature and feature-off Clippy and tests.
 The facade, runnable agent pipeline, subprocess SIGKILL proof, graph migration,
 multi-process SQLite claiming, cross-process cancellation notification,
 priorities, rate limits, per-node limits, cron, middleware, typed payloads,
-metrics, per-run commit serialization, and host-supplied run ids are deferred.
+per-run commit serialization, and host-supplied run ids are deferred.

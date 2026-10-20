@@ -32,10 +32,13 @@ The reviewers are `reviewer-a`, `reviewer-b`, and `reviewer-c`. Findings sum to 
 
 Plain `resume` discovers runs from the first 10,000 historical pipeline runs, then filters out terminal runs. In heavily reused directories, use `resume --run ID` to select a newer run explicitly.
 
+`--telemetry` sends traces, metrics, and JSON logs to the local Datadog Agent. It reads `DD_*` and `DMT_TELEMETRY_*` settings; see the [configuration table and Agent runbook](../../crates/dmt-telemetry/README.md). It is off by default and needs no credentials in the example process. Telemetry config errors exit 2; installation errors exit 1.
+
 Global flags work before or after the subcommand: `--workers` defaults to 3 (at least 1), `--lease-secs` to 2 (at least 1), and `--timeout-secs` to 600. Heartbeats run every 500 ms. `claim_limit = 1` makes one worker strictly sequential. `demo` and `run` accept `--input JSON`, defaulting to `null`.
 
 ```sh
 cargo run -p agent-pipeline -- demo
+cargo run -p agent-pipeline -- --telemetry demo
 cargo run -p agent-pipeline -- run --data /tmp/pipeline
 cargo run -p agent-pipeline -- show --data /tmp/pipeline --run RUN_ID
 cargo run -p agent-pipeline -- signal --data /tmp/pipeline --run RUN_ID --name signoff --label approved
@@ -58,7 +61,7 @@ All three files are created with mode 0600 on Unix. Payloads are plaintext; use 
 
 ## Crash injection
 
-`AGENT_PIPELINE_CRASH_AT` is a test-only switch. The example compiles `dmt`'s `sqlite` and `test-faults` features unconditionally and is never published. Workspace tests therefore enable fault code; the xtask per-package checks prove feature-off builds.
+`AGENT_PIPELINE_CRASH_AT` is a test-only switch. The example compiles `dmt`'s `sqlite`, `test-faults`, and `telemetry` features unconditionally and is never published. Workspace tests therefore enable fault code; the xtask per-package checks prove feature-off builds.
 
 - `<node>` aborts inside that handler after its first durable ledger append.
 - `<node>:<branch>` restricts the handler abort to a branch index, e.g. `review:1`.
@@ -83,3 +86,7 @@ cargo test -p agent-pipeline --test crash_resume
 Every child uses one worker, a 2 s lease, and a 30 s watchdog. The test proves 11 distinct effects, repeated invocation attempts for both crash points, 14 unique task completions matching the last claims, one join satisfaction, three park/resume transitions, gap-free events, and an empty final task/signal snapshot. Child working directories and all artifacts stay in temporary directories.
 
 These deaths exercise parked state, an in-handler boundary, and the pre-apply boundary. Death inside a SQLite transaction is covered separately by the [SQLite atomicity tests](../../crates/dmt-store-sqlite/tests/atomicity.rs). See the [facade guide](../../crates/dmt/README.md) for the durability contract, WAL caveat, and host responsibilities.
+
+## Offline telemetry test
+
+`cargo test -p agent-pipeline --test cli telemetry_flag_is_offline_safe` points traces at a closed port and metrics at a test-owned UDP socket. It checks unchanged stdout, correlated JSON stderr, and the final RunCompleted metric. Every other CLI and crash-resume test omits `--telemetry`, preserving exact stderr checks and avoiding exporter threads in killed children.

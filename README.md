@@ -14,6 +14,7 @@ Milestone 1 is complete at the crate level: core graph and planner, store contra
 | `dmt-store` | Storage interface | Available: `dmt-gzao` |
 | `dmt-store-conformance` | Shared store conformance checks | Available: `dmt-gzao` |
 | `dmt-store-sqlite` | SQLite storage | Available: `dmt-0hq5` |
+| `dmt-telemetry` | Datadog traces, metrics, logs | Available |
 | `dmt-runtime` | Workflow execution | Available: `dmt-76cp` |
 | `dmt` | Public facade | Available: `dmt-nvsm` |
 | `examples/agent-pipeline` | Runnable workflow example | Available: `dmt-nvsm` |
@@ -33,6 +34,8 @@ Run the fake agent workflow and its crash-resume proof without credentials:
 cargo run -p agent-pipeline -- demo
 cargo test -p agent-pipeline
 ```
+
+Opt in to local Datadog export with `cargo run -p agent-pipeline -- --telemetry demo`; see the [telemetry runbook](crates/dmt-telemetry/README.md).
 
 See the [facade embedding guide](crates/dmt/README.md) and [example CLI guide](examples/agent-pipeline/README.md).
 
