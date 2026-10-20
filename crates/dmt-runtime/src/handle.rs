@@ -1,6 +1,6 @@
 use crate::telemetry::{self, names};
 use crate::{EngineError, commit_loop, shared::Shared, shutdown};
-use dmt_core::{GraphId, RunId, RunSnapshot, RunStatus, WorkerId, plan_start};
+use dmt_core::{Graph, GraphId, RunId, RunSnapshot, RunStatus, WorkerId, plan_start};
 use dmt_store::{EventRecord, StoreError};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
@@ -53,39 +53,12 @@ impl EngineHandle {
         let span = tracing::info_span!("start_run", %run_id, %graph_id, graph_version = graph.version(), "operation.name" = "dmt.start_run", "resource.name" = %graph_id, result = tracing::field::Empty);
         telemetry::run_scope(&span, &run_id);
         async {
-        let result = async {
-        let mut last = StoreError::Busy;
-        for retry in 0..=shared.config.max_replan_attempts {
-            commit_loop::delay(shared, retry).await;
-            let commit = plan_start(graph, run_id.clone(), input.clone(), shared.clock.now())?;
-            let kinds = telemetry::event_kinds(&commit);
-            match shared.store.create_run(commit).await {
-                Ok(_) => {
-                    telemetry::count_events(&kinds);
-                    metrics::counter!(names::RUNS_STARTED, "graph_id" => graph_id.to_string()).increment(1);
-                    tracing::info!(%run_id, %graph_id, "run started");
-                    shared.wake.notify_waiters();
-                    return Ok(run_id);
-                }
-                Err(StoreError::VersionConflict { .. }) if retry > 0 => {
-                    telemetry::count_events(&kinds);
-                    metrics::counter!(names::RUNS_STARTED, "graph_id" => graph_id.to_string()).increment(1);
-                    tracing::info!(%run_id, %graph_id, "run started");
-                    shared.wake.notify_waiters();
-                    return Ok(run_id);
-                }
-                Err(e) if commit_loop::transient(&e) => last = e,
-                Err(e) => return Err(e.into()),
-            }
+            let result = create_run(shared, graph, run_id, input).await;
+            tracing::Span::current().record("result", telemetry::host_result(&result));
+            result
         }
-        Err(EngineError::Contention {
-            attempts: shared.config.max_replan_attempts.saturating_add(1),
-            last,
-        })
-        }.await;
-        tracing::Span::current().record("result", telemetry::host_result(&result));
-        result
-        }.instrument(span).await
+        .instrument(span)
+        .await
     }
 
     /// Read a run snapshot.
@@ -316,4 +289,37 @@ impl EngineHandle {
     pub async fn shutdown(&self, drain: Duration) -> Result<(), EngineError> {
         shutdown::graceful(&self.inner.shared, drain).await
     }
+}
+
+async fn create_run(
+    shared: &Shared,
+    graph: &Graph,
+    run_id: RunId,
+    input: Value,
+) -> Result<RunId, EngineError> {
+    let graph_id = graph.id();
+    let mut last = StoreError::Busy;
+    for retry in 0..=shared.config.max_replan_attempts {
+        commit_loop::delay(shared, retry).await;
+        let commit = plan_start(graph, run_id.clone(), input.clone(), shared.clock.now())?;
+        let kinds = telemetry::event_kinds(&commit);
+        match shared.store.create_run(commit).await {
+            Ok(_) => {}
+            Err(StoreError::VersionConflict { .. }) if retry > 0 => {}
+            Err(error) if commit_loop::transient(&error) => {
+                last = error;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        telemetry::count_events(&kinds);
+        metrics::counter!(names::RUNS_STARTED, "graph_id" => graph_id.to_string()).increment(1);
+        tracing::info!(%run_id, %graph_id, "run started");
+        shared.wake.notify_waiters();
+        return Ok(run_id);
+    }
+    Err(EngineError::Contention {
+        attempts: shared.config.max_replan_attempts.saturating_add(1),
+        last,
+    })
 }

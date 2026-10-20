@@ -4,7 +4,7 @@ use crate::{
     commit_loop::{self, Operation},
     shared::Shared,
 };
-use dmt_core::PlanError;
+use dmt_core::{PlanError, RunId};
 use dmt_store::StoreError;
 use std::sync::Arc;
 use tracing::Instrument;
@@ -22,24 +22,11 @@ pub(crate) async fn run(shared: Arc<Shared>) {
                     if shared.stop.is_cancelled() {
                         return;
                     }
-                    let span = tracing::info_span!("sweep", run_id = %signal.run_id, kind = "timeout", "operation.name" = "dmt.sweep", "resource.name" = "timeout", result = tracing::field::Empty);
-                    telemetry::run_scope(&span, &signal.run_id);
-                    async {
-                        let result = classify(
-                            commit_loop::unowned(
-                                &shared,
-                                &signal.run_id,
-                                Operation::Timeout(&signal.signal_id),
-                            )
-                            .await
-                            .result,
-                            true,
-                        );
-                        tracing::Span::current().record("result", result);
-                        metrics::counter!(names::SWEEPS, "kind" => "timeout", "result" => result)
-                            .increment(1);
-                    }
-                    .instrument(span)
+                    process(
+                        &shared,
+                        &signal.run_id,
+                        Operation::Timeout(&signal.signal_id),
+                    )
                     .await;
                 }
             }
@@ -56,25 +43,7 @@ pub(crate) async fn run(shared: Arc<Shared>) {
                     if shared.stop.is_cancelled() {
                         return;
                     }
-                    let span = tracing::info_span!("sweep", run_id = %task.run_id, kind = "exhausted", "operation.name" = "dmt.sweep", "resource.name" = "exhausted", result = tracing::field::Empty);
-                    telemetry::run_scope(&span, &task.run_id);
-                    async {
-                        let result = classify(
-                            commit_loop::unowned(
-                                &shared,
-                                &task.run_id,
-                                Operation::Exhausted(&task.task_id),
-                            )
-                            .await
-                            .result,
-                            false,
-                        );
-                        tracing::Span::current().record("result", result);
-                        metrics::counter!(names::SWEEPS, "kind" => "exhausted", "result" => result)
-                            .increment(1);
-                    }
-                    .instrument(span)
-                    .await;
+                    process(&shared, &task.run_id, Operation::Exhausted(&task.task_id)).await;
                 }
             }
             Err(error) => {
@@ -82,6 +51,22 @@ pub(crate) async fn run(shared: Arc<Shared>) {
             }
         }
     }
+}
+async fn process(shared: &Shared, run_id: &RunId, operation: Operation<'_>) {
+    let kind = operation.kind();
+    let timeout = matches!(operation, Operation::Timeout(_));
+    let span = tracing::info_span!("sweep", %run_id, kind, "operation.name" = "dmt.sweep", "resource.name" = kind, result = tracing::field::Empty);
+    telemetry::run_scope(&span, run_id);
+    async {
+        let result = classify(
+            commit_loop::unowned(shared, run_id, operation).await.result,
+            timeout,
+        );
+        tracing::Span::current().record("result", result);
+        metrics::counter!(names::SWEEPS, "kind" => kind, "result" => result).increment(1);
+    }
+    .instrument(span)
+    .await;
 }
 fn classify(result: Result<(), EngineError>, timeout: bool) -> &'static str {
     let Err(error) = result else {

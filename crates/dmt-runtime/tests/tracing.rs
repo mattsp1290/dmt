@@ -38,7 +38,7 @@ impl Subscriber for Capture {
         attrs.record(&mut fields);
         fields
             .0
-            .insert("name".into(), attrs.metadata().name().into());
+            .insert("span_name".into(), attrs.metadata().name().into());
         self.spans.lock().unwrap().push(fields.0);
         self.metadata.lock().unwrap().push(attrs.metadata());
         Id::from_u64(self.next.fetch_add(1, Ordering::Relaxed) + 1)
@@ -90,45 +90,7 @@ async fn dispatch_spans_and_conflict_events_are_emitted() {
     .await;
     let run = h.start_run(&"linear".into(), Value::Null).await.unwrap();
     completed(&h, &run).await;
-    {
-        let spans = capture.spans.lock().unwrap();
-        assert!(spans.iter().any(|s| s["name"] == "store"
-            && s.get("method").is_some_and(|m| m == "\"apply\"")
-            && s["backend"] == "\"memory\""));
-        let dispatches: Vec<_> = spans.iter().filter(|s| s["name"] == "dispatch").collect();
-        assert_eq!(dispatches.len(), 2);
-        for (span, node) in dispatches.iter().zip(["a", "b"]) {
-            assert_eq!(span["name"], "dispatch");
-            assert_eq!(span["run_id"], run.as_str());
-            assert_eq!(span["node_id"], node);
-            assert_eq!(
-                span["step_key"],
-                StepKey::task(&run, &node.into(), 0).as_str()
-            );
-            assert_eq!(span["attempt"], "1");
-            assert_eq!(span["graph_id"], "linear");
-            assert_eq!(span["graph_version"], "1");
-            assert_eq!(span["task_id"], span["step_key"]);
-            assert_eq!(span["operation.name"], "\"dmt.dispatch\"");
-            assert_eq!(span["resource.name"], format!("linear/{node}"));
-            assert_eq!(span["outcome"], "\"done\"");
-            assert_eq!(span["result"], "\"applied\"");
-        }
-        assert_eq!(spans.iter().filter(|s| s["name"] == "start_run").count(), 1);
-        for name in ["handler", "commit"] {
-            let selected: Vec<_> = spans.iter().filter(|s| s["name"] == name).collect();
-            assert_eq!(selected.len(), 2);
-            for span in selected {
-                assert_eq!(span["run_id"], run.as_str());
-                if name == "handler" {
-                    assert_eq!(span["outcome"], "\"done\"");
-                } else {
-                    assert_eq!(span["attempts"], "1");
-                    assert_eq!(span["result"], "\"applied\"");
-                }
-            }
-        }
-    }
+    assert_linear_spans(&capture, &run);
     h.abort().await;
     let (_, h, _) = run_contention().await;
     assert!(
@@ -184,14 +146,17 @@ async fn signal_cancel_and_sweep_spans_record_results() {
         ("cancel", "terminal"),
         ("sweep", "applied"),
     ] {
-        let span = spans.iter().find(|s| s["name"] == name).unwrap();
+        let span = spans.iter().find(|s| s["span_name"] == name).unwrap();
         assert_eq!(span["run_id"], run.as_str());
         assert_eq!(span["operation.name"], format!("\"dmt.{name}\""));
         assert_eq!(span["result"], format!("\"{result}\""));
+        let resource = if name == "sweep" { "timeout" } else { name };
+        assert_eq!(span["resource.name"], format!("\"{resource}\""));
     }
-    let signal = spans.iter().find(|s| s["name"] == "signal").unwrap();
+    let signal = spans.iter().find(|s| s["span_name"] == "signal").unwrap();
     assert_eq!(signal["resource.name"], "\"signal\"");
-    let sweep = spans.iter().find(|s| s["name"] == "sweep").unwrap();
+    assert_eq!(signal["name"], "\"unknown\"");
+    let sweep = spans.iter().find(|s| s["span_name"] == "sweep").unwrap();
     assert_eq!(sweep["kind"], "\"timeout\"");
 }
 
@@ -232,7 +197,7 @@ async fn handler_failure_timeout_and_panic_are_classified() {
         let spans = capture.spans.lock().unwrap();
         let span = spans
             .iter()
-            .find(|s| s["name"] == "handler" && s["run_id"] == run.as_str())
+            .find(|s| s["span_name"] == "handler" && s["run_id"] == run.as_str())
             .unwrap();
         assert_eq!(span["outcome"], format!("\"{class}\""));
         assert_eq!(span["otel.status_code"], "\"ERROR\"");
@@ -328,6 +293,77 @@ async fn store_instrumentation_can_be_disabled() {
             .lock()
             .unwrap()
             .iter()
-            .all(|s| s["name"] != "store")
+            .all(|s| s["span_name"] != "store")
     );
+}
+
+fn assert_linear_spans(capture: &Capture, run: &RunId) {
+    let spans = capture.spans.lock().unwrap();
+    assert!(spans.iter().any(|s| s["span_name"] == "store"
+        && s.get("method").is_some_and(|m| m == "\"apply\"")
+        && s["backend"] == "\"memory\""));
+    let dispatches: Vec<_> = spans
+        .iter()
+        .filter(|s| s["span_name"] == "dispatch")
+        .collect();
+    assert_eq!(dispatches.len(), 2);
+    for (span, node) in dispatches.iter().zip(["a", "b"]) {
+        assert_eq!(span["span_name"], "dispatch");
+        assert_eq!(span["run_id"], run.as_str());
+        assert_eq!(span["node_id"], node);
+        assert_eq!(
+            span["step_key"],
+            StepKey::task(run, &node.into(), 0).as_str()
+        );
+        assert_eq!(span["attempt"], "1");
+        assert_eq!(span["graph_id"], "linear");
+        assert_eq!(span["graph_version"], "1");
+        assert_eq!(span["task_id"], span["step_key"]);
+        assert_eq!(span["operation.name"], "\"dmt.dispatch\"");
+        assert_eq!(span["resource.name"], format!("linear/{node}"));
+        assert_eq!(span["outcome"], "\"done\"");
+        assert_eq!(span["result"], "\"applied\"");
+    }
+    let starts: Vec<_> = spans
+        .iter()
+        .filter(|s| s["span_name"] == "start_run")
+        .collect();
+    assert_eq!(starts.len(), 1);
+    let start = starts[0];
+    assert_eq!(start["run_id"], run.as_str());
+    assert_eq!(start["graph_id"], "linear");
+    assert_eq!(start["graph_version"], "1");
+    assert_eq!(start["operation.name"], "\"dmt.start_run\"");
+    assert_eq!(start["resource.name"], "linear");
+    assert_eq!(start["result"], "\"ok\"");
+    let store = spans
+        .iter()
+        .find(|s| s["span_name"] == "store" && s["method"] == "\"apply\"")
+        .unwrap();
+    assert_eq!(store["backend"], "\"memory\"");
+    assert_eq!(store["operation.name"], "\"dmt.store\"");
+    assert_eq!(store["resource.name"], "\"apply\"");
+    assert_eq!(store["span.type"], "\"db\"");
+    assert_eq!(store["db.system"], "\"memory\"");
+    assert_eq!(store["result"], "\"ok\"");
+    for name in ["handler", "commit"] {
+        let selected: Vec<_> = spans.iter().filter(|s| s["span_name"] == name).collect();
+        assert_eq!(selected.len(), 2);
+        for span in selected {
+            assert_eq!(span["run_id"], run.as_str());
+            if name == "handler" {
+                assert_eq!(span["outcome"], "\"done\"");
+                assert_eq!(span["graph_id"], "linear");
+                assert_eq!(span["attempt"], "1");
+                assert_eq!(span["operation.name"], "\"dmt.handler\"");
+                assert_eq!(span["resource.name"].trim_matches('"'), span["node_id"]);
+            } else {
+                assert_eq!(span["kind"], "\"outcome\"");
+                assert_eq!(span["operation.name"], "\"dmt.commit\"");
+                assert_eq!(span["resource.name"], "\"outcome\"");
+                assert_eq!(span["attempts"], "1");
+                assert_eq!(span["result"], "\"applied\"");
+            }
+        }
+    }
 }
