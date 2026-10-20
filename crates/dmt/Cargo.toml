@@ -7,10 +7,12 @@ description = "Embeddable graph workflow engine with SQL-persisted, resumable ru
 
 [features]
 default = []
+telemetry = ["dep:dmt-telemetry", "dmt-runtime/otel"]
 sqlite = ["dep:dmt-store-sqlite"]
 test-faults = ["dmt-runtime/test-faults", "dmt-store-sqlite?/test-faults"]
 
 [dependencies]
+dmt-telemetry = { path = "../dmt-telemetry", optional = true }
 dmt-core = { path = "../dmt-core" }
 dmt-store = { path = "../dmt-store" }
 dmt-runtime = { path = "../dmt-runtime" }

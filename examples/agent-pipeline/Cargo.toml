@@ -14,7 +14,8 @@ name = "agent-pipeline"
 path = "src/main.rs"
 
 [dependencies]
-dmt = { path = "../../crates/dmt", features = ["sqlite", "test-faults"] }
+tracing.workspace = true
+dmt = { path = "../../crates/dmt", features = ["sqlite", "test-faults", "telemetry"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 clap.workspace = true
 serde.workspace = true

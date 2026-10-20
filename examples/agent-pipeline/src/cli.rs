@@ -3,6 +3,9 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(about = "Durable agent pipeline with fake, idempotent handlers")]
 pub struct Cli {
+    /// Send traces, metrics, and JSON logs to the local Datadog Agent (reads `DD_*` and `DMT_TELEMETRY_*` variables).
+    #[arg(long, global = true)]
+    pub telemetry: bool,
     #[arg(long, global = true)]
     pub data: Option<PathBuf>,
     #[arg(long, global = true, default_value_t = 3)]

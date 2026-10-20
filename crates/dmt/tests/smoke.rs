@@ -5,6 +5,11 @@ async fn quick_start_completes_on_memory_store() {
 }
 #[test]
 fn module_paths_resolve() {
+    #[cfg(feature = "telemetry")]
+    {
+        let _: Option<dmt::telemetry::TelemetryConfig> = None;
+        let _ = dmt::runtime::telemetry::run_trace_id;
+    }
     let _ = dmt::core::plan_start;
     let _: Option<dmt::core::Commit> = None;
     let _: Option<dmt::store::LeaseProof> = None;

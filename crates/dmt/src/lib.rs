@@ -1,5 +1,5 @@
 //! Host-facing facade over `core`, `store`, and `runtime`.
-//! Enable `sqlite` for durable local runs.
+//! Enable `sqlite` for durable local runs, `telemetry` for optional Datadog wiring.
 //! The `test-faults` feature is only for tests that deliberately crash processes.
 pub use async_trait::async_trait;
 pub use dmt_core as core;
@@ -23,3 +23,9 @@ pub use dmt_store::{
 pub use dmt_store_sqlite as sqlite;
 #[cfg(feature = "sqlite")]
 pub use dmt_store_sqlite::{SqliteOptions, SqliteStore};
+
+/// Optional Datadog transports and JSON logging (`telemetry` feature).
+#[cfg(feature = "telemetry")]
+pub use dmt_telemetry as telemetry;
+#[cfg(feature = "telemetry")]
+pub use dmt_telemetry::{Telemetry, TelemetryConfig};
