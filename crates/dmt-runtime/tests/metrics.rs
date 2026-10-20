@@ -1,46 +1,74 @@
 mod common;
 use common::*;
 use dmt_core::*;
-use dmt_runtime::{EngineConfig, Quiescent, telemetry::names};
+use dmt_runtime::{Quiescent, telemetry::names};
 use dmt_store::*;
 use metrics_util::debugging::{DebugValue, Snapshotter};
 use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 
+#[derive(Eq, PartialEq, Ord, PartialOrd)]
+struct Series {
+    name: String,
+    labels: Vec<(String, String)>,
+}
 struct Observations {
     source: Snapshotter,
-    counters: std::cell::RefCell<std::collections::BTreeMap<String, u64>>,
+    counts: std::cell::RefCell<std::collections::BTreeMap<Series, u64>>,
 }
 impl Observations {
-    fn counter(&self, name: &str, labels: &[(&str, &str)]) -> u64 {
-        let key = |name: &str, labels: &[(&str, &str)]| format!("{name}{labels:?}");
-        let mut totals = self.counters.borrow_mut();
-        // Snapshots drain every series; cache all counters before selecting one.
-        for (metric, _, _, value) in self.source.snapshot().into_vec() {
-            if let DebugValue::Counter(value) = value {
-                let mut pairs: Vec<_> = metric
-                    .key()
-                    .labels()
-                    .map(|l| (l.key(), l.value()))
-                    .collect();
-                pairs.sort_unstable();
-                *totals.entry(key(metric.key().name(), &pairs)).or_default() += value;
-            }
+    fn capture(
+        &self,
+    ) -> Vec<(
+        metrics_util::CompositeKey,
+        Option<metrics::Unit>,
+        Option<metrics::SharedString>,
+        DebugValue,
+    )> {
+        let entries = self.source.snapshot().into_vec();
+        let mut totals = self.counts.borrow_mut();
+        // Debug snapshots drain every series: retain counters and histogram sample counts.
+        for (metric, _, _, value) in &entries {
+            let count = match value {
+                DebugValue::Counter(value) => *value,
+                DebugValue::Histogram(values) => u64::try_from(values.len()).unwrap(),
+                DebugValue::Gauge(_) => continue,
+            };
+            let mut labels: Vec<_> = metric
+                .key()
+                .labels()
+                .map(|l| (l.key().to_owned(), l.value().to_owned()))
+                .collect();
+            labels.sort_unstable();
+            *totals
+                .entry(Series {
+                    name: metric.key().name().to_owned(),
+                    labels,
+                })
+                .or_default() += count;
         }
-        totals
+        entries
+    }
+    fn count(&self, name: &str, labels: &[(&str, &str)]) -> u64 {
+        self.capture();
+        self.counts
+            .borrow()
             .iter()
-            .filter(|(k, _)| {
-                k.starts_with(name)
-                    && labels
-                        .iter()
-                        .all(|(label, value)| k.contains(&format!("(\"{label}\", \"{value}\")")))
+            .filter(|(series, _)| {
+                series.name == name
+                    && labels.iter().all(|(k, v)| {
+                        series
+                            .labels
+                            .iter()
+                            .any(|(key, value)| key == k && value == v)
+                    })
             })
-            .map(|(_, v)| v)
+            .map(|(_, count)| count)
             .sum()
     }
 }
 fn counter(snapshot: &Observations, name: &str, labels: &[(&str, &str)]) -> u64 {
-    snapshot.counter(name, labels)
+    snapshot.count(name, labels)
 }
 
 #[tokio::test(start_paused = true)]
@@ -49,7 +77,7 @@ async fn metrics_follow_engine_activity() {
     let source = recorder.snapshotter();
     let snapshot = Observations {
         source,
-        counters: std::cell::RefCell::default(),
+        counts: std::cell::RefCell::default(),
     };
     metrics::set_global_recorder(recorder).unwrap();
     linear_metrics(&snapshot).await;
@@ -73,7 +101,7 @@ async fn linear_metrics(snapshot: &Observations) {
     let run = h.start_run(&"linear".into(), Value::Null).await.unwrap();
     completed(&h, &run).await;
     h.abort().await;
-    let entries = snapshot.source.snapshot().into_vec();
+    let entries = snapshot.capture();
     for name in [
         names::DISPATCH_DURATION,
         names::HANDLER_DURATION,
@@ -95,20 +123,6 @@ async fn linear_metrics(snapshot: &Observations) {
             .any(|(key, _, _, v)| key.key().name() == names::IN_FLIGHT
                 && matches!(v, DebugValue::Gauge(g) if f64::from(*g) == 0.0))
     );
-    for (metric, _, _, value) in entries {
-        if let DebugValue::Counter(value) = value {
-            let mut pairs: Vec<_> = metric
-                .key()
-                .labels()
-                .map(|l| (l.key(), l.value()))
-                .collect();
-            pairs.sort_unstable();
-            snapshot
-                .counters
-                .borrow_mut()
-                .insert(format!("{}{pairs:?}", metric.key().name()), value);
-        }
-    }
     for (name, labels, expected) in [
         (names::RUNS_STARTED, vec![("graph_id", "linear")], 1),
         (names::TASKS_CLAIMED, vec![("graph_id", "linear")], 2),
@@ -197,6 +211,10 @@ async fn host_metrics(snapshot: &Observations) {
     .await
     .unwrap();
     assert_eq!(counter(snapshot, names::SIGNALS, &[("result", "ok")]), 1);
+    assert_eq!(
+        counter(snapshot, names::EVENTS, &[("kind", "SignalReceived")]),
+        1
+    );
     let run = h.start_run(&"wait".into(), Value::Null).await.unwrap();
     h.wait_quiescent(&run, Duration::from_secs(5))
         .await
@@ -208,31 +226,82 @@ async fn host_metrics(snapshot: &Observations) {
         counter(snapshot, names::CANCELS, &[("result", "terminal")]),
         1
     );
+    assert_eq!(
+        counter(snapshot, names::EVENTS, &[("kind", "RunCancelled")]),
+        1
+    );
     h.abort().await;
 }
 async fn lease_metric(snapshot: &Observations) {
-    // A rejected lease is observable independently of the heartbeat path.
     let store = CountingStore::new(Arc::new(MemoryStore::new()));
-    store.script(
-        "apply",
-        vec![common::store::Fault::Instead(StoreError::LeaseLost {
-            task_id: "test".into(),
-        })],
-    );
-    let h = start(
-        store,
-        Arc::new(ManualClock::new(T0)),
-        fixtures::retry_chain(1),
-        EngineConfig { ..fast_config() },
-        &[("a", handler(|_, _| async { done() }))],
+    let clock = Arc::new(ManualClock::new(T0));
+    let old_gate = Gate::new();
+    let new_gate = Gate::new();
+    let old_wait = old_gate.clone();
+    let new_wait = new_gate.clone();
+    let records = Recorder::default();
+    let rec = records.clone();
+    let handlers = [(
+        "a",
+        handler(move |ctx, _| {
+            let gate = if ctx.attempt == 1 {
+                old_wait.clone()
+            } else {
+                new_wait.clone()
+            };
+            let rec = rec.clone();
+            async move {
+                rec.record(ctx);
+                gate.wait().await;
+                done()
+            }
+        }),
+    )];
+    let before = counter(snapshot, names::TASKS_CLAIMED, &[("graph_id", "retry")]);
+    let first = start(
+        store.clone(),
+        clock.clone(),
+        fixtures::retry_chain(2),
+        fast_config(),
+        &handlers,
     )
     .await;
-    let _ = h.start_run(&"retry".into(), Value::Null).await.unwrap();
-    eventually("lease metric", || async {
+    let run = first.start_run(&"retry".into(), Value::Null).await.unwrap();
+    eventually("original claim", || async { records.count() == 1 }).await;
+    assert_eq!(
+        counter(snapshot, names::TASKS_CLAIMED, &[("graph_id", "retry")]),
+        before + 1
+    );
+    let _ = clock.advance(10_000_001);
+    let second = start(
+        store.clone(),
+        clock,
+        fixtures::retry_chain(2),
+        fast_config(),
+        &handlers,
+    )
+    .await;
+    eventually("reclaimed task", || async { records.count() == 2 }).await;
+    assert_eq!(records.entries()[1].attempt, 2);
+    assert_eq!(
+        counter(snapshot, names::TASKS_CLAIMED, &[("graph_id", "retry")]),
+        before + 2
+    );
+    old_gate.open();
+    eventually("reclaimed lease rejects old commit", || async {
         counter(snapshot, names::LEASE_LOST, &[("source", "commit")]) == 1
     })
     .await;
-    h.abort().await;
+    assert!(
+        store
+            .records()
+            .iter()
+            .any(|r| matches!(r.result, Err(StoreError::LeaseLost { .. })))
+    );
+    new_gate.open();
+    completed(&second, &run).await;
+    first.abort().await;
+    second.abort().await;
 }
 
 async fn retry_metrics(snapshot: &Observations) {
@@ -321,6 +390,12 @@ async fn exhausted_metric(snapshot: &Observations) {
 
 async fn input_and_registration_metrics(snapshot: &Observations) {
     for (node, expected) in [("jn", "bad_input"), ("a", "no_handler")] {
+        let labels = [
+            ("graph_id", "fan-out"),
+            ("node_id", node),
+            ("result", "applied"),
+        ];
+        let before = snapshot.count(names::DISPATCH_DURATION, &labels);
         let store = Arc::new(MemoryStore::new());
         let graph = fixtures::fan_out(JoinPolicy::All);
         store.register_graph(&graph).await.unwrap();
@@ -352,6 +427,16 @@ async fn input_and_registration_metrics(snapshot: &Observations) {
             counter(snapshot, names::DISPATCH_OUTCOMES, &[("outcome", expected)]) == 1
         })
         .await;
+        assert_eq!(
+            h.wait_quiescent(&run, Duration::from_secs(5))
+                .await
+                .unwrap(),
+            Quiescent::Terminal(RunStatus::Failed)
+        );
         h.abort().await;
+        assert_eq!(
+            snapshot.count(names::DISPATCH_DURATION, &labels),
+            before + 1
+        );
     }
 }

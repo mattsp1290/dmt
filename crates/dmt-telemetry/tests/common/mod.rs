@@ -73,3 +73,32 @@ impl io::Write for &SharedBuf {
         Ok(())
     }
 }
+
+/// Re-execute a real-provider witness with test-owned environment settings.
+/// Returns true in the parent after verifying the child, false in the child.
+pub fn isolated_datadog_test(name: &str) -> bool {
+    const MARKER: &str = "DMT_DATADOG_TEST_CHILD";
+    if std::env::var(MARKER).as_deref() == Ok(name) {
+        return false;
+    }
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command.args(["--exact", name, "--nocapture"]);
+    for (key, _) in std::env::vars_os() {
+        let key_text = key.to_string_lossy();
+        if key_text.starts_with("DD_") || key_text.starts_with("DMT_TELEMETRY_") {
+            command.env_remove(key);
+        }
+    }
+    let output = command
+        .env(MARKER, name)
+        .env("DD_TRACE_ENABLED", "true")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "isolated {name}: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}

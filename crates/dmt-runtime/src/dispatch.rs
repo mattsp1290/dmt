@@ -1,4 +1,4 @@
-use crate::telemetry::{self, names};
+use crate::telemetry::{self, DispatchResult, HandlerClass, names};
 use crate::{
     CancellationToken, NodeContext, NodeOutcomeResult, commit_loop,
     handler::node_input,
@@ -57,9 +57,9 @@ pub(crate) async fn run(
             () = beats => work.await,
         };
         let span = tracing::Span::current();
-        span.record("result", result);
-        if !matches!(result, "applied" | "dropped") { span.record("otel.status_code", "ERROR"); }
-        metrics::histogram!(names::DISPATCH_DURATION, "graph_id" => claimed.graph_id.to_string(), "node_id" => claimed.task.node_id.to_string(), "result" => result).record(start.elapsed().as_secs_f64());
+        span.record("result", result.label());
+        if result.is_error() { span.record("otel.status_code", "ERROR"); }
+        metrics::histogram!(names::DISPATCH_DURATION, "graph_id" => claimed.graph_id.to_string(), "node_id" => claimed.task.node_id.to_string(), "result" => result.label()).record(start.elapsed().as_secs_f64());
     }
     .instrument(span)
     .await;
@@ -68,21 +68,21 @@ async fn run_task(
     shared: &Shared,
     claimed: &ClaimedTask,
     cancel: &CancellationToken,
-) -> &'static str {
+) -> DispatchResult {
     let graph = match commit_loop::resolve(shared, &claimed.graph_id, claimed.graph_version).await {
         Ok(graph) => graph,
         Err(error) => {
             tracing::error!(error = %telemetry::truncate_message(&error.to_string()), "dispatch graph unavailable");
-            return "graph_unavailable";
+            return DispatchResult::GraphUnavailable;
         }
     };
     let Some(node) = graph.node(&claimed.task.node_id) else {
         tracing::error!("dispatch node unavailable");
-        return "node_unavailable";
+        return DispatchResult::NodeUnavailable;
     };
     if matches!(node.kind, NodeKind::Wait { .. } | NodeKind::End { .. }) {
         tracing::error!("node kind is never dispatched");
-        return "node_unavailable";
+        return DispatchResult::NodeUnavailable;
     }
     let (outcome, class) = if let Some(handler) = shared.handlers.get(&claimed.task.node_id) {
         match node_input(&node.kind, &claimed.task) {
@@ -108,7 +108,7 @@ async fn run_task(
                     message,
                     retryable: false,
                 }),
-                "bad_input",
+                HandlerClass::BadInput,
             ),
         }
     } else {
@@ -120,14 +120,16 @@ async fn run_task(
                 ),
                 retryable: false,
             }),
-            "no_handler",
+            HandlerClass::NoHandler,
         )
     };
-    tracing::Span::current().record("outcome", class);
-    metrics::counter!(names::DISPATCH_OUTCOMES, "graph_id" => claimed.graph_id.to_string(), "node_id" => claimed.task.node_id.to_string(), "outcome" => class).increment(1);
+    tracing::Span::current().record("outcome", class.label());
+    metrics::counter!(names::DISPATCH_OUTCOMES, "graph_id" => claimed.graph_id.to_string(), "node_id" => claimed.task.node_id.to_string(), "outcome" => class.label()).increment(1);
     match outcome {
-        Some(outcome) => commit_loop::outcome(shared, &graph, claimed, outcome).await,
-        None => "aborted",
+        Some(outcome) => commit_loop::outcome(shared, &graph, claimed, outcome)
+            .await
+            .into(),
+        None => DispatchResult::Aborted,
     }
 }
 async fn run_handler(
@@ -137,7 +139,7 @@ async fn run_handler(
     ctx: NodeContext,
     input: crate::NodeInput,
     timeout: Option<Duration>,
-) -> (Option<NodeOutcome>, &'static str) {
+) -> (Option<NodeOutcome>, HandlerClass) {
     let span = tracing::info_span!("handler", run_id = %claimed.task.run_id, graph_id = %claimed.graph_id, node_id = %claimed.task.node_id, attempt = claimed.task.attempt, "operation.name" = "dmt.handler", "resource.name" = %claimed.task.node_id, outcome = tracing::field::Empty, "otel.status_code" = tracing::field::Empty, "error.message" = tracing::field::Empty);
     let start = std::time::Instant::now();
     let cancel = ctx.cancel.clone();
@@ -156,32 +158,25 @@ async fn run_handler(
             () = timeout_future => {
                 tracing::warn!(timeout_ms = timeout.map(|t| u64::try_from(t.as_millis()).unwrap_or(u64::MAX)), "handler timed out");
                 cancel.cancel(); task.abort(); let _ = task.await;
-                (Some(NodeOutcome::Fail { message: format!("handler timed out after {timeout:?}"), retryable: true }), "timeout")
+                (Some(NodeOutcome::Fail { message: format!("handler timed out after {timeout:?}"), retryable: true }), HandlerClass::Timeout)
             }
         }
     }.instrument(span.clone()).await;
-    span.record("outcome", class);
+    span.record("outcome", class.label());
     if let Some(NodeOutcome::Fail { message, .. }) = &outcome {
         span.record("otel.status_code", "ERROR");
         span.record("error.message", telemetry::truncate_message(message));
     }
-    metrics::histogram!(names::HANDLER_DURATION, "graph_id" => claimed.graph_id.to_string(), "node_id" => claimed.task.node_id.to_string(), "outcome" => class).record(start.elapsed().as_secs_f64());
+    metrics::histogram!(names::HANDLER_DURATION, "graph_id" => claimed.graph_id.to_string(), "node_id" => claimed.task.node_id.to_string(), "outcome" => class.label()).record(start.elapsed().as_secs_f64());
     (outcome, class)
 }
 
 fn handler_result(
     result: Result<Option<NodeOutcomeResult>, tokio::task::JoinError>,
-) -> (Option<NodeOutcome>, &'static str) {
+) -> (Option<NodeOutcome>, HandlerClass) {
     match result {
         Ok(Some(Ok(outcome))) => {
-            let class = match &outcome {
-                NodeOutcome::Done(_) => "done",
-                NodeOutcome::FanOut(_) => "fan_out",
-                NodeOutcome::Fail {
-                    retryable: true, ..
-                } => "fail_retryable",
-                NodeOutcome::Fail { .. } => "fail_permanent",
-            };
+            let class = HandlerClass::for_outcome(&outcome);
             (Some(outcome), class)
         }
         Ok(Some(Err(error))) => {
@@ -195,9 +190,9 @@ fn handler_result(
                     message: "handler panicked".into(),
                     retryable: true,
                 }),
-                "panic",
+                HandlerClass::Panic,
             )
         }
-        _ => (None, "aborted"),
+        _ => (None, HandlerClass::Aborted),
     }
 }

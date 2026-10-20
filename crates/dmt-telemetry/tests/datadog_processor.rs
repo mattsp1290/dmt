@@ -25,6 +25,9 @@ fn low(bytes: [u8; 16]) -> u64 {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn fan_out_run_survives_the_datadog_span_processor() {
+    if common::isolated_datadog_test("fan_out_run_survives_the_datadog_span_processor") {
+        return;
+    }
     let agent = agent::Agent::start();
     let exporter = InMemorySpanExporter::default();
     let config = dmt_telemetry::TelemetryConfig {

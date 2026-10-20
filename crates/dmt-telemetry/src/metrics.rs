@@ -3,6 +3,9 @@ use metrics_exporter_dogstatsd::{BuildError, DogStatsDBuilder};
 use std::time::Duration;
 
 pub(crate) fn install_recorder(config: &TelemetryConfig) -> Result<Duration, TelemetryError> {
+    let interval = config
+        .metrics_flush_interval
+        .max(Duration::from_millis(100));
     let mut labels = vec![metrics::Label::new("service", config.service.clone())];
     if let Some(env) = &config.env {
         labels.push(metrics::Label::new("env", env.clone()));
@@ -13,7 +16,7 @@ pub(crate) fn install_recorder(config: &TelemetryConfig) -> Result<Duration, Tel
     DogStatsDBuilder::default()
         .with_remote_address(&config.dogstatsd_addr)
         .map_err(|e| TelemetryError::Dogstatsd(e.to_string()))?
-        .with_flush_interval(config.metrics_flush_interval)
+        .with_flush_interval(interval)
         .with_global_labels(labels)
         .with_telemetry(false)
         .install()
@@ -21,5 +24,5 @@ pub(crate) fn install_recorder(config: &TelemetryConfig) -> Result<Duration, Tel
             BuildError::FailedToInstall => TelemetryError::AlreadyInstalled("metrics recorder"),
             other => TelemetryError::Dogstatsd(other.to_string()),
         })?;
-    Ok(config.metrics_flush_interval)
+    Ok(interval)
 }

@@ -142,3 +142,6 @@ pub fn run_parent_context(run_id: &RunId) -> opentelemetry::Context {
         TraceState::default(),
     ))
 }
+
+mod classification;
+pub(crate) use classification::{CommitResult, DispatchResult, HandlerClass};

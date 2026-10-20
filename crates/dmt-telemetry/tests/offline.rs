@@ -26,10 +26,16 @@ fn shutdown(url: String) {
 }
 #[test]
 fn shutdown_is_bounded_when_the_agent_refuses() {
+    if common::isolated_datadog_test("shutdown_is_bounded_when_the_agent_refuses") {
+        return;
+    }
     shutdown("http://127.0.0.1:1".into());
 }
 #[test]
 fn shutdown_is_bounded_when_the_agent_black_holes() {
+    if common::isolated_datadog_test("shutdown_is_bounded_when_the_agent_black_holes") {
+        return;
+    }
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     shutdown(format!("http://{}", listener.local_addr().unwrap()));
 }

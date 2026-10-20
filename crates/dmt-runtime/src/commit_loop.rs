@@ -1,4 +1,4 @@
-use crate::telemetry::{self, names};
+use crate::telemetry::{self, CommitResult, names};
 use crate::{EngineError, backoff::replan_delay, shared::Shared};
 use dmt_core::{Commit, Graph, Micros, NodeOutcome, PlanError, RunSnapshot, TaskId, plan_outcome};
 use dmt_store::{ClaimedTask, StoreError};
@@ -50,13 +50,13 @@ pub(crate) async fn outcome(
     graph: &Graph,
     claimed: &ClaimedTask,
     outcome: NodeOutcome,
-) -> &'static str {
+) -> CommitResult {
     let span = tracing::info_span!("commit", run_id = %claimed.task.run_id, kind = "outcome", "operation.name" = "dmt.commit", "resource.name" = "outcome", attempts = tracing::field::Empty, result = tracing::field::Empty);
     async {
         let start = std::time::Instant::now();
         let result = outcome_loop(shared, graph, claimed, outcome).await;
-        tracing::Span::current().record("result", result);
-        metrics::histogram!(names::COMMIT_DURATION, "kind" => "outcome", "result" => result)
+        tracing::Span::current().record("result", result.label());
+        metrics::histogram!(names::COMMIT_DURATION, "kind" => "outcome", "result" => result.label())
             .record(start.elapsed().as_secs_f64());
         result
     }
@@ -68,7 +68,7 @@ async fn outcome_loop(
     graph: &Graph,
     claimed: &ClaimedTask,
     outcome: NodeOutcome,
-) -> &'static str {
+) -> CommitResult {
     for retry in 0..=shared.config.max_replan_attempts {
         tracing::Span::current().record("attempts", retry.saturating_add(1));
         delay(shared, retry).await;
@@ -81,7 +81,7 @@ async fn outcome_loop(
             other => {
                 tracing::error!(result = ?other.as_ref().map(Option::is_some), "run unavailable");
                 attempt("outcome", "rejected");
-                return "rejected";
+                return CommitResult::Rejected;
             }
         };
         let commit = match plan_with_downgrade(
@@ -99,12 +99,12 @@ async fn outcome_loop(
             ) => {
                 tracing::debug!("stale outcome dropped");
                 attempt("outcome", "dropped");
-                return "dropped";
+                return CommitResult::Dropped;
             }
             Err(error) => {
                 tracing::error!(error = %telemetry::truncate_message(&error.to_string()), "outcome cannot be planned");
                 attempt("outcome", "plan_error");
-                return "rejected";
+                return CommitResult::Rejected;
             }
         };
         #[cfg(feature = "test-faults")]
@@ -123,7 +123,7 @@ async fn outcome_loop(
                 telemetry::count_events(&kinds);
                 attempt("outcome", "applied");
                 shared.wake.notify_waiters();
-                return "applied";
+                return CommitResult::Applied;
             }
             Err(e) if retryable(&e) => {
                 attempt("outcome", store_attempt(&e));
@@ -133,22 +133,22 @@ async fn outcome_loop(
                 tracing::warn!("lease lost");
                 metrics::counter!(names::LEASE_LOST, "graph_id" => claimed.graph_id.to_string(), "node_id" => claimed.task.node_id.to_string(), "source" => "commit").increment(1);
                 attempt("outcome", "lease_lost");
-                return "lease_lost";
+                return CommitResult::LeaseLost;
             }
             Err(StoreError::RunTerminal { .. }) => {
                 tracing::debug!("run terminal");
                 attempt("outcome", "terminal");
-                return "terminal";
+                return CommitResult::Terminal;
             }
             Err(error) => {
                 tracing::error!(error = %telemetry::truncate_message(&error.to_string()), "commit rejected");
                 attempt("outcome", "rejected");
-                return "rejected";
+                return CommitResult::Rejected;
             }
         }
     }
     tracing::error!("replan attempts exhausted");
-    "exhausted"
+    CommitResult::Exhausted
 }
 fn plan_with_downgrade(
     graph: &Graph,
@@ -249,17 +249,7 @@ pub(crate) async fn unowned(
     let result = async {
         let start = std::time::Instant::now();
         let result = unowned_loop(shared, run_id, &operation, &mut ambiguous).await;
-        let label = match &result {
-            Ok(()) => "applied",
-            Err(EngineError::RunNotFound { .. }) => "run_not_found",
-            Err(
-                EngineError::RunTerminal { .. }
-                | EngineError::Store(StoreError::RunTerminal { .. })
-                | EngineError::Plan(PlanError::RunTerminal { .. }),
-            ) => "terminal",
-            Err(EngineError::Contention { .. }) => "exhausted",
-            Err(_) => "error",
-        };
+        let label = CommitResult::for_unowned(&result).label();
         tracing::Span::current().record("result", label);
         metrics::histogram!(names::COMMIT_DURATION, "kind" => kind, "result" => label)
             .record(start.elapsed().as_secs_f64());
