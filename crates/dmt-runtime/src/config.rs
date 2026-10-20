@@ -5,6 +5,8 @@ use std::time::Duration;
 /// Engine concurrency, timing, and retry settings.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
+    /// Wrap every store call with spans and metrics; set false when the host wraps it.
+    pub instrument_store: bool,
     /// Claim loops; zero disables all background work.
     pub workers: usize,
     /// Maximum concurrent dispatches per worker.
@@ -35,6 +37,7 @@ pub struct EngineConfig {
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
+            instrument_store: true,
             workers: 4,
             claim_limit: 8,
             poll_interval: Duration::from_millis(250),
@@ -84,6 +87,7 @@ mod tests {
     #[test]
     fn defaults_match_the_plan() {
         let c = EngineConfig::default();
+        assert!(c.instrument_store);
         assert_eq!(
             (c.workers, c.claim_limit, c.max_replan_attempts),
             (4, 8, 16)

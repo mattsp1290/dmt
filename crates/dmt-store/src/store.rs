@@ -79,6 +79,11 @@ use dmt_core::{
 
 #[async_trait]
 pub trait Store: Send + Sync {
+    /// Informational, bounded backend label; not a conformance requirement.
+    fn backend_name(&self) -> &'static str {
+        "unknown"
+    }
+
     /// Register graph.
     /// # Errors
     /// Returns `StoreError` on a contract violation or backend failure; any method may return `Busy`.

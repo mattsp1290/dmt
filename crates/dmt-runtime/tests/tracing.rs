@@ -92,6 +92,9 @@ async fn dispatch_spans_and_conflict_events_are_emitted() {
     completed(&h, &run).await;
     {
         let spans = capture.spans.lock().unwrap();
+        assert!(spans.iter().any(|s| s["name"] == "store"
+            && s.get("method").is_some_and(|m| m == "\"apply\"")
+            && s["backend"] == "\"memory\""));
         let dispatches: Vec<_> = spans.iter().filter(|s| s["name"] == "dispatch").collect();
         assert_eq!(dispatches.len(), 2);
         for (span, node) in dispatches.iter().zip(["a", "b"]) {
@@ -295,5 +298,36 @@ async fn payload_sentinels_never_reach_telemetry() {
             capture.events.lock().unwrap()
         )
         .contains("SENTINEL-")
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn store_instrumentation_can_be_disabled() {
+    let capture = Arc::new(Capture::default());
+    let _guard = tracing::subscriber::set_default(capture.clone());
+    let h = start(
+        Arc::new(MemoryStore::new()),
+        Arc::new(ManualClock::new(T0)),
+        fixtures::linear(),
+        dmt_runtime::EngineConfig {
+            instrument_store: false,
+            ..fast_config()
+        },
+        &[
+            ("a", handler(|_, _| async { done() })),
+            ("b", handler(|_, _| async { done() })),
+        ],
+    )
+    .await;
+    let run = h.start_run(&"linear".into(), Value::Null).await.unwrap();
+    completed(&h, &run).await;
+    h.abort().await;
+    assert!(
+        capture
+            .spans
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|s| s["name"] != "store")
     );
 }

@@ -15,6 +15,10 @@ use dmt_store::{
 
 #[async_trait]
 impl Store for SqliteStore {
+    fn backend_name(&self) -> &'static str {
+        "sqlite"
+    }
+
     async fn register_graph(&self, graph: &Graph) -> Result<(), StoreError> {
         writes::register(self, graph).await
     }
