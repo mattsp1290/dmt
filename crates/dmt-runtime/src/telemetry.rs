@@ -84,7 +84,14 @@ pub(crate) fn count_events(kinds: &[&'static str]) {
         metrics::counter!(names::EVENTS, "kind" => kind).increment(1);
     }
 }
-pub(crate) fn run_scope(span: &tracing::Span, run_id: &RunId) {
+/// Join a host-owned span to the deterministic trace for an existing run.
+///
+/// Call immediately after creating the span, before entering it, instrumenting a
+/// future with it, or materializing its OpenTelemetry context. With the `otel`
+/// feature and an OpenTelemetry layer installed, this sets the synthetic run root
+/// as the parent. Without either, it has no effect. It does not record a `run_id`
+/// field: declare that on the host span when it should be searchable by run.
+pub fn run_scope(span: &tracing::Span, run_id: &RunId) {
     #[cfg(feature = "otel")]
     {
         use tracing_opentelemetry::OpenTelemetrySpanExt;

@@ -6,6 +6,29 @@ Optional Datadog trace export, DogStatsD metrics, and correlated JSON logs for d
 
 The pinned chain is `datadog-opentelemetry =0.5.2`, `opentelemetry =0.32.0`, `opentelemetry_sdk =0.32.1`, `tracing-opentelemetry =0.33.0`. Upgrade all four together.
 
+Enabling the facade's `telemetry` feature enables `serde_json/preserve_order`
+through Cargo feature unification for the whole host binary. JSON `Value` object
+iteration then preserves insertion order. Graph definition hashes remain stable:
+graph definitions use typed fields and ordered maps, and hash tests cover reordered
+input keys with and without this feature. Existing `dmt.db` files need no migration
+when enabling telemetry; neither the graph hash format nor the database schema changes.
+
+## Host-owned run spans
+
+Hosts can join their own operations to an existing dmt run without depending on
+`tracing-opentelemetry`:
+
+```rust,ignore
+let span = tracing::info_span!("projection", run_id = %run_id);
+dmt::runtime::telemetry::run_scope(&span, &run_id);
+// Enter the span or instrument its future only after assigning the run scope.
+```
+
+The public helper is available in feature-off builds as a no-op. The facade's
+`telemetry` feature enables the runtime's `otel` hook. Call the helper before
+entering the span or materializing its OpenTelemetry context; it assigns the
+synthetic run parent but does not add fields to the host span.
+
 ## Quick start
 
 Enable `dmt = { version = "0.1", features = ["telemetry"] }` in the host manifest. Initialize before creating the runtime and shut down after dropping it:
